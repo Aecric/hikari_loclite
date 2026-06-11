@@ -44,11 +44,15 @@ bool FastLioFixedMap::Init(const std::string& yaml_path) {
         // IMU
         double gyr_cov = yaml["fast_lio"]["gyr_cov"].as<double>(0.01);
         double acc_cov = yaml["fast_lio"]["acc_cov"].as<double>(0.01);
+        double b_gyr_cov = yaml["fast_lio"]["b_gyr_cov"].as<double>(0.0001);
+        double b_acc_cov = yaml["fast_lio"]["b_acc_cov"].as<double>(0.0001);
+        bool use_imu_filter = yaml["fast_lio"]["imu_filter"].as<bool>(false);
         p_imu_->SetExtrinsic(offset_t_lidar_fixed_, offset_R_lidar_fixed_);
         p_imu_->SetGyrCov(Vec3d(gyr_cov, gyr_cov, gyr_cov));
         p_imu_->SetAccCov(Vec3d(acc_cov, acc_cov, acc_cov));
-        p_imu_->SetGyrBiasCov(Vec3d(0.0001, 0.0001, 0.0001));
-        p_imu_->SetAccBiasCov(Vec3d(0.0001, 0.0001, 0.0001));
+        p_imu_->SetGyrBiasCov(Vec3d(b_gyr_cov, b_gyr_cov, b_gyr_cov));
+        p_imu_->SetAccBiasCov(Vec3d(b_acc_cov, b_acc_cov, b_acc_cov));
+        p_imu_->SetUseIMUFilter(use_imu_filter);
 
         // iVox
         ivox_options_.resolution_ = yaml["fast_lio"]["ivox_grid_resolution"].as<float>(0.2);
@@ -62,11 +66,21 @@ bool FastLioFixedMap::Init(const std::string& yaml_path) {
         // Scan filter
         double filter_size_scan = yaml["fast_lio"]["filter_size_scan"].as<double>(0.2);
         filter_size_map_min_ = yaml["fast_lio"]["filter_size_map"].as<double>(0.2);
+        min_pts_ = yaml["fast_lio"]["min_pts"].as<int>(300);
+        esti_plane_threshold_ = yaml["fast_lio"]["esti_plane_threshold"].as<float>(fasterlio::ESTI_PLANE_THRESHOLD);
+        max_lidar_residual_mean_ = yaml["fast_lio"]["max_lidar_residual_mean"].as<double>(0.05);
         voxel_scan_.setLeafSize(filter_size_scan, filter_size_scan, filter_size_scan);
 
         // Fixed map config
         crop_radius_m_ = yaml["fixed_map"]["crop_radius_m"].as<double>(30.0);
         max_points_ = yaml["fixed_map"]["max_points"].as<int>(800000);
+
+        if (yaml["roi"]) {
+            const float height_max = yaml["roi"]["height_max"].as<float>(3.0f);
+            const float height_min = yaml["roi"]["height_min"].as<float>(-3.0f);
+            preprocess_->SetHeightROI(height_max, height_min);
+            LOG(INFO) << "FastLioFixedMap: ROI height [" << height_min << ", " << height_max << "]";
+        }
 
     } catch (const std::exception& e) {
         LOG(ERROR) << "FastLioFixedMap: failed to load config: " << e.what();
@@ -75,11 +89,19 @@ bool FastLioFixedMap::Init(const std::string& yaml_path) {
 
     // ESKF init
     ESKF::Options eskf_options;
-    eskf_options.max_iterations_ = fasterlio::NUM_MAX_ITERATIONS;
+    try {
+        auto yaml = YAML::LoadFile(yaml_path);
+        eskf_options.max_iterations_ = yaml["fast_lio"]["max_iteration"].as<int>(fasterlio::NUM_MAX_ITERATIONS);
+    } catch (...) {
+        eskf_options.max_iterations_ = fasterlio::NUM_MAX_ITERATIONS;
+    }
     eskf_options.epsi_ = 1e-3 * Eigen::Matrix<double, ESKF::state_dim_, 1>::Ones();
     eskf_options.lidar_obs_func_ = [this](NavState& s, ESKF::CustomObservationModel& obs) { ObsModel(s, obs); };
     eskf_options.use_aa_ = false;
     kf_.Init(eskf_options);
+    LOG(INFO) << "FastLioFixedMap: diagnostics enabled, max_lidar_residual_mean="
+              << max_lidar_residual_mean_ << ", min_pts=" << min_pts_
+              << ", esti_plane_threshold=" << esti_plane_threshold_;
 
     return true;
 }
@@ -163,15 +185,26 @@ bool FastLioFixedMap::RebuildLocalMapAround(const SE3& T_map_lidar) {
     return true;
 }
 
-bool FastLioFixedMap::ResetToMapPose(const SE3& T_map_lidar) {
+SE3 FastLioFixedMap::ImuPoseToLidarPose(const SE3& T_map_imu) const {
+    const SE3 T_imu_lidar(SO3(offset_R_lidar_fixed_), offset_t_lidar_fixed_);
+    return T_map_imu * T_imu_lidar;
+}
+
+SE3 FastLioFixedMap::LidarPoseToImuPose(const SE3& T_map_lidar) const {
+    const SE3 T_imu_lidar(SO3(offset_R_lidar_fixed_), offset_t_lidar_fixed_);
+    return T_map_lidar * T_imu_lidar.inverse();
+}
+
+bool FastLioFixedMap::ResetToMapPose(const SE3& T_map_lidar, bool reset_velocity) {
     LOG(INFO) << "FastLioFixedMap: reset to pose [" << T_map_lidar.translation().transpose() << "]";
 
-    // Reset ESKF state
-    NavState new_state;
-    new_state.SetPose(T_map_lidar);
-    new_state.vel_ = Vec3d::Zero();
-    new_state.bg_ = Vec3d::Zero();
-    new_state.grav_ = Vec3d(0.0, 0.0, -9.81);
+    // Reset only the map pose. Keep IMU-estimated bias/gravity/time state so
+    // propagation after relocalization does not restart with a wrong inertial model.
+    NavState new_state = kf_.GetX();
+    new_state.SetPose(LidarPoseToImuPose(T_map_lidar));
+    if (reset_velocity) {
+        new_state.vel_ = Vec3d::Zero();
+    }
     kf_.ChangeX(new_state);
 
     // Reset covariance
@@ -182,11 +215,13 @@ bool FastLioFixedMap::ResetToMapPose(const SE3& T_map_lidar) {
 
     // Rebuild local map around new pose
     RebuildLocalMapAround(T_map_lidar);
+    tracking_enabled_ = true;
 
-    // Reset IMU processor
-    p_imu_->Reset();
-
-    flg_first_scan_ = true;
+    // Do not reset the IMU processor here. ResetToMapPose is called after a
+    // deskewed scan has already proven the candidate pose; forcing IMU init
+    // again would freeze propagation for the init window and publish a static
+    // pose. Keep the IMU time base and continue matching from the next frame.
+    flg_first_scan_ = false;
 
     return true;
 }
@@ -276,24 +311,24 @@ bool FastLioFixedMap::RunOnce(NavState* state) {
     p_imu_->Process(measures_, kf_, scan_undistort_);
     if (!scan_undistort_ || scan_undistort_->empty()) return false;
 
+    if (!tracking_enabled_) {
+        last_lidar_update_valid_ = false;
+        state_point_ = kf_.GetX();
+        state_point_.timestamp_ = measures_.lidar_end_time_;
+        *state = state_point_;
+        return true;
+    }
+
     if (flg_first_scan_) {
+        // 固定地图不变量: 冷启动首帧只初始化 state/时间基准,
+        // 绝不向 fixed_ivox_ 插入当前 scan 点 —— 固定地图永不被当前 scan 污染.
+        // fixed_ivox_ 在 LoadFixedMap / RebuildLocalMapAround 时已由地图点建好,
+        // ESKF 从下一帧起直接对固定地图匹配, 无需首帧建图起步.
         state_point_ = kf_.GetX();
         state_point_.timestamp_ = measures_.lidar_end_time_;
         first_lidar_time_ = measures_.lidar_end_time_;
         flg_first_scan_ = false;
-
-        // Add first scan to iVox
-        scan_down_world_->resize(scan_undistort_->size());
-        for (size_t i = 0; i < scan_undistort_->size(); i++) {
-            Vec3d p_global(state_point_.rot_ *
-                               (offset_R_lidar_fixed_ * scan_undistort_->points[i].getVector3fMap().cast<double>() + offset_t_lidar_fixed_) +
-                           state_point_.pos_);
-            scan_down_world_->points[i].x = p_global(0);
-            scan_down_world_->points[i].y = p_global(1);
-            scan_down_world_->points[i].z = p_global(2);
-            scan_down_world_->points[i].intensity = scan_undistort_->points[i].intensity;
-        }
-        fixed_ivox_->AddPoints(scan_down_world_->points);
+        last_lidar_update_valid_ = false;
 
         *state = state_point_;
         return true;
@@ -302,11 +337,34 @@ bool FastLioFixedMap::RunOnce(NavState* state) {
     flg_EKF_inited_ = (measures_.lidar_begin_time_ - first_lidar_time_) >= fasterlio::INIT_TIME;
 
     // Downsample
+    last_raw_points_ = static_cast<int>(scan_undistort_->size());
+    last_down_points_ = 0;
+    last_effective_surface_points_ = 0;
+    last_lidar_residual_mean_ = 0.0;
+    last_lidar_residual_max_ = 0.0;
+
     voxel_scan_.setInputCloud(scan_undistort_);
     voxel_scan_.filter(*scan_down_body_);
 
     int cur_pts = scan_down_body_->size();
-    if (cur_pts < 5) return false;
+    if (cur_pts < static_cast<int>(scan_undistort_->size()) * 0.1 || cur_pts < min_pts_) {
+        auto fine_voxel = voxel_scan_;
+        fine_voxel.setLeafSize(0.1, 0.1, 0.1);
+        fine_voxel.setInputCloud(scan_undistort_);
+        fine_voxel.filter(*scan_down_body_);
+        cur_pts = scan_down_body_->size();
+    }
+    last_down_points_ = cur_pts;
+
+    if (cur_pts < 5) {
+        LOG_EVERY_N(WARNING, 20) << "FastLioFixedMap: too few downsampled points, raw="
+                                 << scan_undistort_->size() << ", down=" << cur_pts;
+        last_lidar_update_valid_ = false;
+        state_point_ = kf_.GetX();
+        state_point_.timestamp_ = measures_.lidar_end_time_;
+        *state = state_point_;
+        return true;
+    }
 
     scan_down_world_->resize(cur_pts);
     nearest_points_.resize(cur_pts);
@@ -315,7 +373,27 @@ bool FastLioFixedMap::RunOnce(NavState* state) {
     plane_coef_.resize(cur_pts, Vec4f::Zero());
 
     // EKF update with lidar observation
-    kf_.Update(ESKF::ObsType::LIDAR, 1.0);
+    last_lidar_update_valid_ = false;
+    const bool update_accepted = kf_.Update(ESKF::ObsType::LIDAR, 1.0);
+    last_lidar_update_valid_ = last_lidar_update_valid_ && update_accepted;
+
+    const bool residual_ok = last_lidar_residual_mean_ <= max_lidar_residual_mean_;
+    if (!residual_ok) {
+        last_lidar_update_valid_ = false;
+        LOG_EVERY_N(WARNING, 10) << "FastLioFixedMap: lidar residual too high, median_sq="
+                                 << last_lidar_residual_mean_ << " > " << max_lidar_residual_mean_
+                                 << ", max_sq=" << last_lidar_residual_max_;
+    }
+    LOG_EVERY_N(INFO, 20) << "FastLioFixedMap diag: raw=" << last_raw_points_
+                          << ", down=" << last_down_points_
+                          << ", eff=" << last_effective_surface_points_
+                          << ", update_accepted=" << update_accepted
+                          << ", residual_mean_sq=" << last_lidar_residual_mean_
+                          << ", residual_max_sq=" << last_lidar_residual_max_
+                          << ", final_res_ratio=" << kf_.GetFinalRes()
+                          << ", quality_good=" << TrackingQualityGood()
+                          << ", pose=[" << ImuPoseToLidarPose(kf_.GetX().GetPose()).translation().transpose()
+                          << "]";
 
     state_point_ = kf_.GetX();
     state_point_.timestamp_ = measures_.lidar_end_time_;
@@ -348,7 +426,7 @@ void FastLioFixedMap::ObsModel(NavState& s, ESKF::CustomObservationModel& obs) {
         point_selected_surf_[i] = points_near.size() >= fasterlio::MIN_NUM_MATCH_POINTS;
 
         if (point_selected_surf_[i]) {
-            point_selected_surf_[i] = math::esti_plane(plane_coef_[i], points_near, fasterlio::ESTI_PLANE_THRESHOLD);
+            point_selected_surf_[i] = math::esti_plane(plane_coef_[i], points_near, esti_plane_threshold_);
         }
 
         if (point_selected_surf_[i]) {
@@ -382,8 +460,13 @@ void FastLioFixedMap::ObsModel(NavState& s, ESKF::CustomObservationModel& obs) {
 
     if (effect_feat_surf_ < 20) {
         obs.valid_ = false;
+        last_effective_surface_points_ = effect_feat_surf_;
+        LOG_EVERY_N(WARNING, 20) << "FastLioFixedMap: not enough effective surface points: "
+                                 << effect_feat_surf_ << " / " << cnt_pts;
         return;
     }
+    last_effective_surface_points_ = effect_feat_surf_;
+    last_lidar_update_valid_ = true;
 
     const Mat3f off_R = offset_R_lidar_fixed_.cast<float>();
     const Vec3f off_t = offset_t_lidar_fixed_.cast<float>();
@@ -427,11 +510,14 @@ void FastLioFixedMap::ObsModel(NavState& s, ESKF::CustomObservationModel& obs) {
         std::sort(res_sq.begin(), res_sq.end());
         obs.lidar_residual_mean_ = res_sq[res_sq.size() / 2];
         obs.lidar_residual_max_ = res_sq[res_sq.size() - 1];
+        last_lidar_residual_mean_ = obs.lidar_residual_mean_;
+        last_lidar_residual_max_ = obs.lidar_residual_max_;
     }
 }
 
 bool FastLioFixedMap::TrackingQualityGood() const {
-    return flg_EKF_inited_ && kf_.GetFinalRes() < 5.0;
+    return tracking_enabled_ && last_lidar_update_valid_ && flg_EKF_inited_ && kf_.GetFinalRes() < 5.0 &&
+           last_lidar_residual_mean_ <= max_lidar_residual_mean_;
 }
 
 }  // namespace hikari::loclite

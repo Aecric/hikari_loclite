@@ -84,7 +84,7 @@ void ESKF::Predict(const double& dt, const ESKF::ProcessNoiseType& Q, const Vec3
     SymmetrizeAndFloorCovariance(P_, options_.min_cov_diag_);
 }
 
-void ESKF::Update(ESKF::ObsType obs, const double& R) {
+bool ESKF::Update(ESKF::ObsType obs, const double& R) {
     custom_obs_model_.valid_ = true;
     custom_obs_model_.converge_ = true;
 
@@ -120,7 +120,7 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
         if (custom_obs_model_.valid_ == false) {
             x_ = last_x;
             P_ = P_propagated;
-            return;
+            return false;
         }
 
         if (use_aa_ && i > -1 && (obs == ObsType::LIDAR || obs == ObsType::WHEEL_SPEED_AND_LIDAR) &&
@@ -166,7 +166,9 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
         Eigen::SelfAdjointEigenSolver<Mat6d> eigen_solver(HTH_sym);
         if (eigen_solver.info() != Eigen::Success) {
             LOG(WARNING) << "Failed to decompose ESKF observation information matrix.";
-            continue;
+            x_ = last_x;
+            P_ = P_propagated;
+            return false;
         }
 
         const Vec6d eigen_values = eigen_solver.eigenvalues();
@@ -201,7 +203,11 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
         dx_current = K_r + (K_H - Eigen::Matrix<double, state_dim_, state_dim_>::Identity()) * dx_current;
 
         for (int j = 0; j < state_dim_; ++j) {
-            if (std::isnan(dx_current(j, 0))) return;
+            if (std::isnan(dx_current(j, 0))) {
+                x_ = last_x;
+                P_ = P_propagated;
+                return false;
+            }
         }
 
         const double dx_translation = dx_current.head<3>().norm();
@@ -211,7 +217,7 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
             LOG(ERROR) << "Reject ESKF iter update, dtrans: " << dx_translation << ", drot_deg: " << dx_rotation_deg;
             x_ = start_x;
             P_ = P_propagated;
-            return;
+            return false;
         }
 
         if (!use_aa_) {
@@ -285,6 +291,7 @@ void ESKF::Update(ESKF::ObsType obs, const double& R) {
     }
 
     SymmetrizeAndFloorCovariance(P_, options_.min_cov_diag_);
+    return true;
 }
 
 }  // namespace hikari::loclite

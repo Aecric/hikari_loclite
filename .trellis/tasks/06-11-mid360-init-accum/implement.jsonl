@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/localization-architecture.md", "reason": "Fixed-map Fast-LIO and NDT validation invariants for init/relocalization."}
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "LocLiteNode state machine, /initialpose, and pose candidate validation contracts."}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Change crosses ROS callbacks, scan buffers, NDT, LIO reset, and state publishing."}
+{"file": "src/system/loclite_node.cpp", "reason": "Implemented pending /initialpose accumulation, delayed gravity roll/pitch compensation, accumulated NDT validation, and reset-only-on-success flow."}
+{"file": "include/hikari_loclite/system/loclite_node.hpp", "reason": "Added pending init pose gravity state and bounded accumulation buffers/options."}
+{"file": "config/loclite_livox.yaml", "reason": "Added MID360 init accumulation knobs under reloc."}

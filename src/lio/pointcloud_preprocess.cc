@@ -12,6 +12,9 @@ void PointCloudPreprocess::Set(LidarType lid_type, double bld, int pfilt_num) {
 }
 
 void PointCloudPreprocess::Process(const sensor_msgs::msg::PointCloud2::SharedPtr& msg, PointCloudType::Ptr& pcl_out) {
+    cloud_out_.clear();
+    cloud_full_.clear();
+
     switch (lidar_type_) {
         case LidarType::OUST64:
             Oust64Handler(msg);
@@ -23,7 +26,7 @@ void PointCloudPreprocess::Process(const sensor_msgs::msg::PointCloud2::SharedPt
             RoboSenseHandler(msg);
             break;
         default:
-            LOG(ERROR) << "Error LiDAR Type";
+            LOG(ERROR) << "PointCloud2 input is unsupported for Livox/AVIA lidar_type; use livox CustomMsg";
             break;
     }
     *pcl_out = cloud_out_;
@@ -34,6 +37,10 @@ void PointCloudPreprocess::Process(const livox_ros_driver2::msg::CustomMsg::Shar
     cloud_full_.clear();
 
     int plsize = msg->point_num;
+    if (plsize <= 1) {
+        *pcl_out = cloud_out_;
+        return;
+    }
     cloud_out_.reserve(plsize);
     cloud_full_.resize(plsize);
 

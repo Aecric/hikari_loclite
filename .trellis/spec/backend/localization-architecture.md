@@ -31,6 +31,12 @@ Initialization or LOST recovery uses:
 - `RebuildLocalMapAround()` may crop around the current map-frame pose and
   rebuild a local fixed structure. It must derive from the loaded fixed map, not
   from live scan accumulation.
+- `ResetToMapPose()` must not reset the IMU processor or force the next frame
+  through the cold-start first-scan branch. External poses and NDT corrections
+  are applied after a deskewed scan has already proven the candidate pose; the
+  next frame must continue IMU propagation and fixed-map matching from the new
+  ESKF state. Resetting IMU initialization here freezes pose output for the init
+  window and can let stability gates release a static pose.
 
 Current references:
 

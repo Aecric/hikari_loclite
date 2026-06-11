@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Required build/static checks and fixed-map forbidden patterns."}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Rejected init candidates are normal control flow and must leave LIO state safe."}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Runtime accumulation and validation logs should be bounded and useful."}
+{"check": "git diff --check", "result": "pass"}
+{"check": "docker run --rm -v /home/aecriclin/3d_slam_ws:/root/slam_ws:ro lightning-jazzy:dev bash -lc 'source /opt/ros/jazzy/setup.bash; colcon --log-base /tmp/hikari_loclite_log build --base-paths /root/slam_ws/src/hikari_loclite --packages-select hikari_loclite --build-base /tmp/hikari_loclite_build --install-base /tmp/hikari_loclite_install'", "result": "pass", "note": "Package hikari_loclite built successfully; only existing PCL/FLANN dev warning and deprecated PCL header note appeared on stderr."}

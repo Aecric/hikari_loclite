@@ -43,9 +43,12 @@ class NullLogShim {
 
 #define LOG(severity) hikari::loclite::LogShim(#severity)
 
-#define LOG_EVERY_N(severity, n)                    \
-  static int _hikari_log_counter_##__LINE__ = 0;    \
-  if (_hikari_log_counter_##__LINE__++ % (n) == 0)  \
+#define HIKARI_LOG_CONCAT_INNER(a, b) a##b
+#define HIKARI_LOG_CONCAT(a, b) HIKARI_LOG_CONCAT_INNER(a, b)
+
+#define LOG_EVERY_N(severity, n)                                      \
+  static int HIKARI_LOG_CONCAT(_hikari_log_counter_, __LINE__) = 0;    \
+  if (HIKARI_LOG_CONCAT(_hikari_log_counter_, __LINE__)++ % (n) == 0)  \
     hikari::loclite::LogShim(#severity)
 
 #define DLOG(severity) hikari::loclite::LogShim(#severity)

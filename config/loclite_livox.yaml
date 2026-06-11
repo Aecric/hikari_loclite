@@ -8,9 +8,9 @@ common:
 
 system:
   map_path: ""                          # lightning 地图目录 (含 global.pcd / sc_database.bin 等); 为空时退回 fixed_map.global_pcd; CLI --map_path 优先级最高
-  lidar_frame_id: "lidar_frame"         # 雷达坐标系名称 (level_frame TF 的父 frame / odom 的 child frame)
+  lidar_frame_id: "livox_frame"         # 雷达坐标系名称 (level_frame TF 的父 frame / odom 的 child frame)
   level_frame_id: "level_frame"         # 重力对齐水平坐标系名称 (纯旋转 TF 的子 frame)
-  base_frame_id: "base_link"            # map → base_link TF 的子 frame
+  base_frame_id: "livox_frame"            # map → base_link TF 的子 frame
   base_to_lidar_x: 0.0                  # base_link → lidar 外参平移 x (m)
   base_to_lidar_y: 0.0                  # base_link → lidar 外参平移 y (m)
   base_to_lidar_z: 0.0                  # base_link → lidar 外参平移 z (m)
@@ -21,20 +21,39 @@ system:
   lost_timeout_sec: 5.0                 # Lost 持续超过该时长才转 WAIT_FOR_INITIALPOSE
   level_frame_cutoff_freq: 0.5          # 重力对齐低通滤波截止频率 (Hz)
 
+  # ==== 稳定门控 (轻量版 lightning StabilityGate, 阈值默认照 lightning default_livox.yaml:131-137) ====
+  # /initialpose 经 NDT 验证通过后先停在 Initializing (TF/odom 照发, 照 lightning 方案 B),
+  # 滑窗内位姿抖动持续低于阈值且窗口覆盖 >= window_sec 才放行 Good.
+  stability_gate_enabled: true          # false 时维持旧行为: NDT 验证通过即直接 Good
+  stability_gate_trans_thres: 0.1       # 滑窗内最大平移抖动 (m)
+  stability_gate_rot_thres_deg: 4.0     # 滑窗内最大旋转抖动 (deg)
+  stability_gate_window_sec: 3.0        # 滑动窗口长度 (s)
+  # conf_upper_thres: NDT TP >= 此值视为强可信验证, 不等窗口直接提前放行 Good; <=0 关闭提前放行.
+  # TP 量纲同 ndt.min_confidence (真匹配通常落在 [1.5, 5], 见 lightning default_livox.yaml:136 注释).
+  # 取 3.0 = 真匹配区间中上水平; 注意与 lightning 的 stability_gate_conf_upper_thres(=10, 高分伪匹配守门)
+  # 语义不同, 不要照抄 10 —— >6 已是伪匹配高发区 (lightning init_conf_upper_clamp=6.0), 提前放行反而危险.
+  stability_gate_conf_upper_thres: 3.0
+
 reloc:
   init_max_retries: 5                   # /initialpose sticky retry 最大重试次数, 超过后放弃回 WAIT_FOR_INITIALPOSE
+  init_accum_enabled: true              # MID360 初始化: /initialpose 后先原地累积 deskewed scan, 再跑 FC/NDT
+  init_accum_min_frames: 10             # 累积窗口最少帧数
+  init_accum_min_points: 8000           # 累积窗口最少原始点数
+  init_accum_window_sec: 2.0            # 每个 FC/NDT 尝试前至少累积的时间
+  init_accum_max_wait_sec: 5.0          # 单次 /initialpose 最长等待; 超过仍未验证成功则回 WAIT
+  init_accum_voxel_leaf: 0.1            # 累积点云送入 FC/NDT 前的体素降采样 leaf
 
 runtime:
   publish_tf: true                      # map→base_link 与 lidar_frame→level_frame TF
   publish_odom: true                    # hikari_loc/odom
   publish_path: true                    # hikari_loc/path (0.1s 节流, 上限 5000; 契约接口默认开启)
-  publish_pcdmap: false                 # 是否发布 /pcdmap: 原始 global.pcd 按 fixed_map.voxel_leaf 降采样后发布到 map frame, 供定位匹配验证
+  publish_pcdmap: true                 # 是否发布 /pcdmap: 原始 global.pcd 按 fixed_map.voxel_leaf 降采样后发布到 map frame, 供定位匹配验证
 
 fixed_map:
   global_pcd: "/root/slam_ws/data/new_map/global.pcd"
   voxel_leaf: 0.2
-  crop_radius_m: 30.0
-  max_points: 800000
+  crop_radius_m: 80.0
+  max_points: 8000000
 
 fast_lio:
   filter_size_scan: 0.2
@@ -61,17 +80,25 @@ fast_lio:
   enable_icp_part: false
   proj_kfs: false
   esti_plane_threshold: 0.1
+  max_lidar_residual_mean: 0.05       # LIO 点面残差 median(res^2) 上限; 超过视为坏匹配并进入 Degraded/Lost
 
 roi:
   height_max: 3.0
-  height_min: -3.0
+  height_min: -1.0
 
 ndt:
   enabled: true
-  threads: 1
-  resolution: 1.0
-  min_confidence: 1.0
-  max_delta_trans_m: 1.0
-  max_delta_rot_deg: 10.0
+  threads: 1                            # pclomp OMP 线程数; 嵌入式保持 1, 避免与 LIO 主链路抢核 (lightning P1 setNumThreads(1) 同款考量)
+  resolution: 0.5                      # target 体素分辨率 (m); Mid360 室内 1.0m 足够 (lightning local_ndt 同款)
+  source_leaf: 0.3                      # 源点云 (去畸变 scan) 降采样 leaf (m), 控制单次 Align 的 CPU 预算
+  # min_confidence: NDT 置信度下限, 量纲为 pclomp getTransformationProbability() (TP),
+  # 即"已匹配点的平均 Gaussian 密度" (配准得分 / 源点数), 与点云密度/场景结构相关.
+  # 标定依据 (lightning): tracking_conf_thres_=1.5 (lidar_loc.h, TP<1.5 视为低质量),
+  # multi_scale_bad_conf_thres=1.5 (default_livox.yaml:219); 真匹配 TP 通常落在 [1.5, 5],
+  # >6 多为致密几何伪匹配 (init_conf_upper_clamp=6.0). 故取 1.5 = "至少是正常质量的真匹配".
+  # 现场标定方法: 看 Validate 拒绝日志里的 TP 数值; 正确位姿若持续被拒可适当下调 (不建议 <1.0).
+  min_confidence: 1.5
+  max_delta_trans_m: 1.0                # Validate: 收敛位姿相对候选 guess 的平移上限 (m)
+  max_delta_rot_deg: 10.0               # Validate: 收敛位姿相对候选 guess 的旋转上限 (deg)
   good_rate_hz: 1.0                     # GOOD 态低频 NDT 漂移校正频率 (Hz, 按时间间隔判断而非帧数)
   gain_good: 0.5                        # GOOD 态 NDT 校正增益 (0~1, 增益混合后 ResetToMapPose)

@@ -1,6 +1,7 @@
 #include "system/loclite_node.hpp"
 #include "math/loclite_math.hpp"
 
+#include <pcl/filters/voxel_grid.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <yaml-cpp/yaml.h>
 
@@ -51,8 +52,10 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
     std::string livox_topic = "/livox/lidar";
     std::string cloud_topic = "/cloud";
     std::string yaml_map_path;
+    int lidar_type = 1;
     double voxel_leaf = 0.2;
     double level_cutoff = 0.5;
+    StabilityGate::Options gate_options;
     try {
         auto yaml = YAML::LoadFile(config_path_);
         if (yaml["common"]) {
@@ -72,6 +75,14 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
             lost_timeout_sec_ = sys["lost_timeout_sec"].as<double>(5.0);
             level_cutoff = sys["level_frame_cutoff_freq"].as<double>(0.5);
 
+            // 稳定门控 knobs (轻量版 lightning StabilityGate, 阈值默认照 default_livox.yaml:131-137;
+            // conf_upper_thres 按本包 TP 提前放行语义重标, 见 stability_gate.hpp / yaml 注释)
+            gate_options.enabled = sys["stability_gate_enabled"].as<bool>(true);
+            gate_options.trans_thres = sys["stability_gate_trans_thres"].as<double>(0.1);
+            gate_options.rot_thres_deg = sys["stability_gate_rot_thres_deg"].as<double>(4.0);
+            gate_options.window_sec = sys["stability_gate_window_sec"].as<double>(3.0);
+            gate_options.conf_upper_thres = sys["stability_gate_conf_upper_thres"].as<double>(3.0);
+
             // base_link → lidar 外参: R = Rz(yaw)·Ry(pitch)·Rx(roll), T_lidar_base = inv(T_base_lidar)
             const double bx = sys["base_to_lidar_x"].as<double>(0.0);
             const double by = sys["base_to_lidar_y"].as<double>(0.0);
@@ -88,8 +99,18 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
             RCLCPP_INFO(this->get_logger(), "base->lidar extrinsic: t=[%.3f, %.3f, %.3f], rpy=[%.3f, %.3f, %.3f]",
                         bx, by, bz, br, bp, byw);
         }
+        if (yaml["fast_lio"]) {
+            lidar_type = yaml["fast_lio"]["lidar_type"].as<int>(1);
+        }
         if (yaml["reloc"]) {
-            init_max_retries_ = yaml["reloc"]["init_max_retries"].as<int>(5);
+            auto reloc = yaml["reloc"];
+            init_max_retries_ = reloc["init_max_retries"].as<int>(5);
+            init_accum_enabled_ = reloc["init_accum_enabled"].as<bool>(true);
+            init_accum_min_frames_ = reloc["init_accum_min_frames"].as<int>(10);
+            init_accum_min_points_ = reloc["init_accum_min_points"].as<int>(8000);
+            init_accum_window_sec_ = reloc["init_accum_window_sec"].as<double>(2.0);
+            init_accum_max_wait_sec_ = reloc["init_accum_max_wait_sec"].as<double>(5.0);
+            init_accum_voxel_leaf_ = reloc["init_accum_voxel_leaf"].as<double>(0.1);
         }
         if (yaml["runtime"]) {
             auto rt = yaml["runtime"];
@@ -146,7 +167,24 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
         RCLCPP_ERROR(this->get_logger(), "Failed to init NdtCorrector");
         return false;
     }
-    ndt_->SetMap(lio_->FixedMapCloud());
+    if (!ndt_->SetMap(lio_->FixedMapCloud())) {
+        RCLCPP_ERROR(this->get_logger(), "Failed to set NDT target map");
+        return false;
+    }
+
+    // 稳定门控: /initialpose 验证通过后先 Initializing, 滑窗收敛 (或高 TP 提前) 才放行 Good
+    stability_gate_.Init(gate_options);
+    stability_gate_enabled_ = gate_options.enabled;
+    RCLCPP_INFO(this->get_logger(),
+                "StabilityGate: enabled=%d, trans_thres=%.2f m, rot_thres=%.1f deg, window=%.1f s, "
+                "conf_upper_thres(TP)=%.2f",
+                gate_options.enabled ? 1 : 0, gate_options.trans_thres, gate_options.rot_thres_deg,
+                gate_options.window_sec, gate_options.conf_upper_thres);
+    RCLCPP_INFO(this->get_logger(),
+                "Init accumulation: enabled=%d, min_frames=%d, min_points=%d, window=%.2fs, max_wait=%.2fs, "
+                "voxel_leaf=%.2fm",
+                init_accum_enabled_ ? 1 : 0, init_accum_min_frames_, init_accum_min_points_,
+                init_accum_window_sec_, init_accum_max_wait_sec_, init_accum_voxel_leaf_);
 
     // 重力对齐滤波器 (lidar_frame → level_frame 纯旋转 TF)
     GravityAlignmentFilter::Options gf_options;
@@ -165,13 +203,18 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
         imu_topic, rclcpp::QoS(100),
         [this](sensor_msgs::msg::Imu::SharedPtr msg) { OnImu(std::move(msg)); });
 
-    livox_sub_ = create_subscription<livox_ros_driver2::msg::CustomMsg>(
-        livox_topic, rclcpp::QoS(5).best_effort(),
-        [this](livox_ros_driver2::msg::CustomMsg::SharedPtr msg) { OnLivox(std::move(msg)); });
-
-    cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        cloud_topic, rclcpp::QoS(5).best_effort(),
-        [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) { OnCloud(std::move(msg)); });
+    if (lidar_type == 1) {
+        livox_sub_ = create_subscription<livox_ros_driver2::msg::CustomMsg>(
+            livox_topic, rclcpp::QoS(5).best_effort(),
+            [this](livox_ros_driver2::msg::CustomMsg::SharedPtr msg) { OnLivox(std::move(msg)); });
+        RCLCPP_INFO(this->get_logger(), "LiDAR input: Livox CustomMsg only (%s)", livox_topic.c_str());
+    } else {
+        cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+            cloud_topic, rclcpp::QoS(5).best_effort(),
+            [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) { OnCloud(std::move(msg)); });
+        RCLCPP_INFO(this->get_logger(), "LiDAR input: PointCloud2 only (%s), lidar_type=%d",
+                    cloud_topic.c_str(), lidar_type);
+    }
 
     initial_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
         "/initialpose", rclcpp::QoS(5),
@@ -220,8 +263,8 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
         PublishStatusTopics(this->now().seconds());
     });
 
-    RCLCPP_INFO(this->get_logger(), "hikari_loclite initialized successfully (imu=%s, livox=%s, cloud=%s)",
-                imu_topic.c_str(), livox_topic.c_str(), cloud_topic.c_str());
+    RCLCPP_INFO(this->get_logger(), "hikari_loclite initialized successfully (imu=%s, lidar_type=%d)",
+                imu_topic.c_str(), lidar_type);
     return true;
 }
 
@@ -270,29 +313,19 @@ void LocLiteNode::OnInitialPose(geometry_msgs::msg::PoseWithCovarianceStamped::S
     const Mat3d R_msg = q_in.toRotationMatrix();
     const double yaw_init = std::atan2(R_msg(1, 0), R_msg(0, 0));
 
-    // Step 2: roll/pitch 从当前 LIO 重力对齐姿态读取, LIO 未就绪则退回 0 (冷启动, 还没有 IMU 观测)
-    double roll_lio = 0.0, pitch_lio = 0.0;
-    if (lio_has_output_) {
-        const Mat3d R_lio = lio_->LatestState().rot_.matrix();
-        roll_lio = std::atan2(R_lio(2, 1), R_lio(2, 2));
-        pitch_lio = std::asin(-std::clamp(R_lio(2, 0), -1.0, 1.0));
-    }
-
-    // Step 3: R_map_base = Rz(yaw)·Ry(pitch_lio)·Rx(roll_lio)
-    const Eigen::AngleAxisd yaw_aa(yaw_init, Vec3d::UnitZ());
-    const Eigen::AngleAxisd pitch_aa(pitch_lio, Vec3d::UnitY());
-    const Eigen::AngleAxisd roll_aa(roll_lio, Vec3d::UnitX());
-    const Mat3d R_map_base = (yaw_aa * pitch_aa * roll_aa).toRotationMatrix();
-    const SE3 T_map_base(SO3(R_map_base), Vec3d(p.position.x, p.position.y, p.position.z));
-
-    // Step 4: T_map_lidar = T_map_base × T_base_lidar (T_base_lidar = inv(T_lidar_base_))
-    const SE3 T_map_lidar = T_map_base * T_lidar_base_.inverse();
-
-    // 限次重试 (sticky retry): 保存 pending pose, 由后续每帧的去畸变 scan 做 NDT 验证
-    pending_init_pose_ = T_map_lidar;
+    // 保存平面 /initialpose. 真正的 T_map_lidar 延迟到 LIO/IMU 已有重力姿态后构造,
+    // 避免倾斜安装时过早用 roll/pitch=0 进入 FC/NDT.
+    pending_init_base_position_ = Vec3d(p.position.x, p.position.y, p.position.z);
+    pending_init_yaw_ = yaw_init;
+    pending_init_pose_gravity_ready_ = false;
     has_pending_init_pose_ = true;
     init_retry_count_ = 0;
-    marker_pose_ = T_map_lidar;
+    ResetInitAccumulation();
+    marker_pose_ = SE3(SO3(Eigen::AngleAxisd(yaw_init, Vec3d::UnitZ()).toRotationMatrix()),
+                       pending_init_base_position_);
+    if (lio_has_output_) {
+        UpdatePendingInitPoseWithGravity();
+    }
 
     // 状态机原子复位: 清空 bad/good 计数 (SetInitializing 内) 与 lost 计时器
     state_machine_.SetInitializing("external_pose");
@@ -306,9 +339,9 @@ void LocLiteNode::OnInitialPose(geometry_msgs::msg::PoseWithCovarianceStamped::S
 
     RCLCPP_INFO(this->get_logger(),
                 "[ExtPose] /initialpose 已接入 (t=%.3f): pos=[%.3f, %.3f, %.3f], yaw=%.1f deg, "
-                "roll_lio=%.1f deg, pitch_lio=%.1f deg, blackout 窗口至 t=%.3f",
+                "gravity_comp=%d, blackout 窗口至 t=%.3f",
                 now_sec, p.position.x, p.position.y, p.position.z, yaw_init * 180.0 / M_PI,
-                roll_lio * 180.0 / M_PI, pitch_lio * 180.0 / M_PI, blackout_deadline_sec_);
+                pending_init_pose_gravity_ready_ ? 1 : 0, blackout_deadline_sec_);
 }
 
 void LocLiteNode::ProcessFrame() {
@@ -325,6 +358,12 @@ void LocLiteNode::ProcessFrame() {
 
     // /initialpose sticky retry: 每个新 scan 到来时验证 pending pose
     if (has_pending_init_pose_) {
+        if (!UpdatePendingInitPoseWithGravity()) {
+            RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                                 "[FC-Init] waiting for LIO/IMU gravity compensation before accumulation");
+            PublishStatusTopics(ts);
+            return;
+        }
         HandlePendingInitPose(scan, ts);
         PublishStatusTopics(ts);
         return;
@@ -333,10 +372,15 @@ void LocLiteNode::ProcessFrame() {
     const auto loc_state = state_machine_.State();
 
     if (loc_state == LiteLocState::Good || loc_state == LiteLocState::Degraded) {
-        state.SetPose(smoother_.UpdateFastLioPose(state.GetPose()));
+        const SE3 raw_lidar_pose = lio_->ImuPoseToLidarPose(state.GetPose());
+        const SE3 smoothed_lidar_pose = smoother_.UpdateFastLioPose(raw_lidar_pose);
+        const SE3 smoother_delta = smoothed_lidar_pose.inverse() * raw_lidar_pose;
+        const bool output_jump_rejected =
+            smoother_delta.translation().norm() > 1e-6 || smoother_delta.so3().log().norm() > 1e-6;
+        state.SetPose(lio_->LidarPoseToImuPose(smoothed_lidar_pose));
 
         const auto prev = state_machine_.State();
-        state_machine_.ObserveTrackingQuality(lio_->TrackingQualityGood());
+        state_machine_.ObserveTrackingQuality(lio_->TrackingQualityGood() && !output_jump_rejected);
         if (state_machine_.State() == LiteLocState::Lost && prev != LiteLocState::Lost) {
             // Lost 进入时刻, 供 lost_timeout_sec 计时 (不立即转 WAIT)
             lost_enter_ts_ = ts;
@@ -345,10 +389,33 @@ void LocLiteNode::ProcessFrame() {
         }
 
         // Good 态低频 NDT 漂移校正
-        if (state_machine_.State() == LiteLocState::Good) {
+        if (state_machine_.State() == LiteLocState::Good && !output_jump_rejected) {
             MaybeNdtCorrectGood(scan, state, ts);
+        } else if (output_jump_rejected) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                 "Fast-LIO output jump rejected by smoother, mark tracking bad");
         }
 
+        PublishPose(state);
+    } else if (loc_state == LiteLocState::Initializing) {
+        // 稳定门控期 (照 lightning 方案 B): TF/odom 照发, loc_state 保持 Initializing,
+        // 滑窗内位姿抖动收敛 (或 NDT TP 提前放行) 后才切 Good.
+        // 只有 /initialpose 验证通过后才会走到这里 (验证期间 has_pending_init_pose_ 已提前 return).
+        const SE3 raw_lidar_pose = lio_->ImuPoseToLidarPose(state.GetPose());
+        const SE3 smoothed_lidar_pose = smoother_.UpdateFastLioPose(raw_lidar_pose);
+        const SE3 smoother_delta = smoothed_lidar_pose.inverse() * raw_lidar_pose;
+        const bool output_jump_rejected =
+            smoother_delta.translation().norm() > 1e-6 || smoother_delta.so3().log().norm() > 1e-6;
+        state.SetPose(lio_->LidarPoseToImuPose(smoothed_lidar_pose));
+        if (!output_jump_rejected && stability_gate_.Observe(ts, smoothed_lidar_pose, last_ndt_confidence_)) {
+            state_machine_.SetGood("stability_gate_released");
+            last_ndt_correct_ts_ = ts;  // Good 态 NDT 漂移校正从放行时刻起计时
+            RCLCPP_INFO(this->get_logger(), "stability gate released, switch to GOOD (TP=%.3f)",
+                        last_ndt_confidence_);
+        } else if (output_jump_rejected) {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                 "Fast-LIO output jump rejected during initialization");
+        }
         PublishPose(state);
     } else if (loc_state == LiteLocState::Lost) {
         // Lost 持续超过 lost_timeout_sec 才转 WAIT_FOR_INITIALPOSE
@@ -364,7 +431,7 @@ void LocLiteNode::ProcessFrame() {
             return;
         }
     }
-    // WaitForInitialPose / Uninitialized / Initializing: 无可信位姿, 只上报状态.
+    // WaitForInitialPose / Uninitialized: 无可信位姿, 只上报状态.
     // WAIT 态按契约 1Hz 节流持续上报 (由 wall timer 负责, 帧不产出时也能上报), 帧路径不再重复发布
     if (state_machine_.State() != LiteLocState::WaitForInitialPose) {
         PublishStatusTopics(ts);
@@ -372,34 +439,182 @@ void LocLiteNode::ProcessFrame() {
 }
 
 void LocLiteNode::HandlePendingInitPose(const CloudPtr& scan, double ts) {
-    const NdtResult res = ndt_->Validate(pending_init_pose_, scan);
+    CloudPtr validate_scan = scan;
+    if (init_accum_enabled_) {
+        const bool ready = AccumulateInitScan(scan, ts);
+        const double total_wait = init_accum_first_ts_ >= 0.0 ? ts - init_accum_first_ts_ : 0.0;
+        if (!ready) {
+            if (init_accum_first_ts_ >= 0.0 && total_wait >= init_accum_max_wait_sec_) {
+                RCLCPP_WARN(this->get_logger(),
+                            "[FC-Init] accumulation timeout: wait=%.2fs, frames=%d, points=%d; rearm /initialpose",
+                            total_wait, init_accum_frames_, init_accum_points_);
+                has_pending_init_pose_ = false;
+                init_retry_count_ = 0;
+                ResetInitAccumulation();
+                state_machine_.SetWaitForInitialPose("init_accum_timeout");
+            }
+            return;
+        }
+        validate_scan = BuildInitAccumulatedCloud();
+        RCLCPP_INFO(this->get_logger(),
+                    "[FC-Init] run accumulated validation: attempt=%d, wait=%.2fs, frames=%d, raw_points=%d, "
+                    "filtered_points=%zu",
+                    init_retry_count_ + 1, total_wait, init_accum_frames_, init_accum_points_,
+                    validate_scan ? validate_scan->size() : 0);
+    }
+
+    const NdtResult res = ndt_->Validate(pending_init_pose_, validate_scan);
     if (res.valid) {
         const int retries = init_retry_count_;
         lio_->ResetToMapPose(res.pose);
         smoother_.Reset();
-        state_machine_.SetGood("external_pose_validated");
         last_ndt_confidence_ = res.confidence;
         has_pending_init_pose_ = false;
         init_retry_count_ = 0;
+        ResetInitAccumulation();
         lost_enter_ts_ = -1.0;
         last_ndt_correct_ts_ = ts;  // 刚做过 NDT, Good 态漂移校正从现在起计时
         marker_pose_ = res.pose;
-        RCLCPP_INFO(this->get_logger(), "init with external pose: [%.3f, %.3f, %.3f] (after %d retries)",
-                    res.pose.translation().x(), res.pose.translation().y(), res.pose.translation().z(), retries);
+        if (stability_gate_enabled_) {
+            // 稳定门控: 验证通过先停在 Initializing (TF/odom 照发), 滑窗收敛或高 TP 提前才放行 Good
+            stability_gate_.Reset();
+            state_machine_.SetInitializing("external_pose_validated");
+            RCLCPP_INFO(this->get_logger(),
+                        "init with external pose: [%.3f, %.3f, %.3f] (after %d retries), TP=%.3f, "
+                        "stability gate armed (Initializing)",
+                        res.pose.translation().x(), res.pose.translation().y(), res.pose.translation().z(),
+                        retries, res.confidence);
+        } else {
+            // 门控关闭: 维持旧行为, 验证通过即 Good
+            state_machine_.SetGood("external_pose_validated");
+            RCLCPP_INFO(this->get_logger(), "init with external pose: [%.3f, %.3f, %.3f] (after %d retries)",
+                        res.pose.translation().x(), res.pose.translation().y(), res.pose.translation().z(),
+                        retries);
+        }
         return;
     }
 
     ++init_retry_count_;
-    if (init_retry_count_ >= init_max_retries_) {
+    if (!init_accum_enabled_ && init_retry_count_ >= init_max_retries_) {
         RCLCPP_WARN(this->get_logger(), "[FC-Init] /initialpose 重试 %d 次仍失败, 放弃, 通知上层 rearm",
                     init_max_retries_);
         has_pending_init_pose_ = false;
         init_retry_count_ = 0;
+        ResetInitAccumulation();
         state_machine_.SetWaitForInitialPose("init_retry_exhausted");
+    } else if (init_accum_enabled_) {
+        const double total_wait = init_accum_first_ts_ >= 0.0 ? ts - init_accum_first_ts_ : 0.0;
+        if (total_wait >= init_accum_max_wait_sec_) {
+            RCLCPP_WARN(this->get_logger(),
+                        "[FC-Init] accumulated FC rejected after %.2fs/%d attempts, rearm /initialpose",
+                        total_wait, init_retry_count_);
+            has_pending_init_pose_ = false;
+            init_retry_count_ = 0;
+            ResetInitAccumulation();
+            state_machine_.SetWaitForInitialPose("init_accum_rejected");
+            return;
+        }
+        RCLCPP_WARN(this->get_logger(),
+                    "[FC-Init] accumulated FC rejected, clear window and keep accumulating (attempt=%d, wait=%.2fs)",
+                    init_retry_count_, total_wait);
+        init_accum_cloud_->clear();
+        init_accum_frames_ = 0;
+        init_accum_points_ = 0;
+        init_accum_window_start_ts_ = -1.0;
     } else {
         RCLCPP_WARN(this->get_logger(), "[FC-Init] FC 拒绝本帧, 保留 init pose 用下一帧重试 (%d/%d)",
                     init_retry_count_, init_max_retries_);
     }
+}
+
+bool LocLiteNode::UpdatePendingInitPoseWithGravity() {
+    if (!has_pending_init_pose_ || !lio_has_output_ || !lio_) {
+        return false;
+    }
+    if (pending_init_pose_gravity_ready_) {
+        return true;
+    }
+
+    const Mat3d R_lidar = lio_->LatestPose().so3().matrix();
+    const double roll_lio = std::atan2(R_lidar(2, 1), R_lidar(2, 2));
+    const double pitch_lio = std::asin(-std::clamp(R_lidar(2, 0), -1.0, 1.0));
+
+    const Eigen::AngleAxisd yaw_aa(pending_init_yaw_, Vec3d::UnitZ());
+    const Eigen::AngleAxisd pitch_aa(pitch_lio, Vec3d::UnitY());
+    const Eigen::AngleAxisd roll_aa(roll_lio, Vec3d::UnitX());
+    const Mat3d R_map_base = (yaw_aa * pitch_aa * roll_aa).toRotationMatrix();
+    const SE3 T_map_base(SO3(R_map_base), pending_init_base_position_);
+    pending_init_pose_ = T_map_base * T_lidar_base_.inverse();
+    marker_pose_ = pending_init_pose_;
+    pending_init_pose_gravity_ready_ = true;
+
+    RCLCPP_INFO(this->get_logger(),
+                "[FC-Init] gravity compensation ready: roll_lidar=%.1f deg, pitch_lidar=%.1f deg, "
+                "candidate=[%.3f, %.3f, %.3f], yaw=%.1f deg",
+                roll_lio * 180.0 / M_PI, pitch_lio * 180.0 / M_PI,
+                pending_init_pose_.translation().x(), pending_init_pose_.translation().y(),
+                pending_init_pose_.translation().z(), pending_init_yaw_ * 180.0 / M_PI);
+    return true;
+}
+
+void LocLiteNode::ResetInitAccumulation() {
+    if (!init_accum_cloud_) {
+        init_accum_cloud_.reset(new PointCloudType());
+    }
+    init_accum_cloud_->clear();
+    init_accum_frames_ = 0;
+    init_accum_points_ = 0;
+    init_accum_first_ts_ = -1.0;
+    init_accum_window_start_ts_ = -1.0;
+}
+
+bool LocLiteNode::AccumulateInitScan(const CloudPtr& scan, double ts) {
+    if (!scan || scan->empty()) {
+        return false;
+    }
+    if (!init_accum_cloud_) {
+        init_accum_cloud_.reset(new PointCloudType());
+    }
+    if (init_accum_first_ts_ < 0.0) {
+        init_accum_first_ts_ = ts;
+    }
+    if (init_accum_window_start_ts_ < 0.0) {
+        init_accum_window_start_ts_ = ts;
+    }
+
+    init_accum_cloud_->points.insert(init_accum_cloud_->points.end(), scan->points.begin(), scan->points.end());
+    init_accum_cloud_->width = init_accum_cloud_->size();
+    init_accum_cloud_->height = 1;
+    init_accum_cloud_->is_dense = false;
+    ++init_accum_frames_;
+    init_accum_points_ += static_cast<int>(scan->size());
+
+    const double window_elapsed = ts - init_accum_window_start_ts_;
+    const bool enough_frames = init_accum_frames_ >= init_accum_min_frames_;
+    const bool enough_points = init_accum_points_ >= init_accum_min_points_;
+    const bool enough_time = window_elapsed >= init_accum_window_sec_;
+    RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+                         "[FC-Init] accumulating: frames=%d/%d, points=%d/%d, window=%.2f/%.2fs",
+                         init_accum_frames_, init_accum_min_frames_, init_accum_points_,
+                         init_accum_min_points_, window_elapsed, init_accum_window_sec_);
+    return enough_frames && enough_points && enough_time;
+}
+
+CloudPtr LocLiteNode::BuildInitAccumulatedCloud() const {
+    CloudPtr filtered(new PointCloudType());
+    if (!init_accum_cloud_ || init_accum_cloud_->empty()) {
+        return filtered;
+    }
+    if (init_accum_voxel_leaf_ <= 0.0) {
+        *filtered = *init_accum_cloud_;
+        return filtered;
+    }
+
+    pcl::VoxelGrid<PointType> voxel;
+    voxel.setLeafSize(init_accum_voxel_leaf_, init_accum_voxel_leaf_, init_accum_voxel_leaf_);
+    voxel.setInputCloud(init_accum_cloud_);
+    voxel.filter(*filtered);
+    return filtered;
 }
 
 void LocLiteNode::MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, double ts) {
@@ -413,12 +628,21 @@ void LocLiteNode::MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, dou
     }
     last_ndt_correct_ts_ = ts;
 
-    const SE3 fast_pose = state.GetPose();
+    const SE3 fast_pose = lio_->ImuPoseToLidarPose(state.GetPose());
     const NdtResult res = ndt_->Align(scan, fast_pose);
     if (!res.valid) {
-        return;
+        return;  // 未收敛 / scan 过稀: 本周期跳过, 不打扰 LIO
     }
     last_ndt_confidence_ = res.confidence;
+
+    // TP 下限守门 (与 Validate 同口径): 低置信度校正宁可跳过等下个周期,
+    // 坏校正比漂移更伤; delta 上限由 smoother 的 max_correction_* 兜底
+    if (res.confidence < ndt_->MinConfidence()) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "[NDT-Good] correction skipped: TP=%.3f < min_confidence=%.3f",
+                             res.confidence, ndt_->MinConfidence());
+        return;
+    }
 
     // 增益混合 + delta 门限 (门限在 smoother 内部, 被拒时原样返回 fast_pose)
     const SE3 corrected = smoother_.ApplyNdtCorrection(fast_pose, res.pose, ndt_gain_good_);
@@ -427,9 +651,9 @@ void LocLiteNode::MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, dou
         return;  // 校正被门限拒绝或可忽略, 不打扰 LIO
     }
 
-    lio_->ResetToMapPose(corrected);
+    lio_->ResetToMapPose(corrected, false);
     smoother_.Reset();
-    state.SetPose(corrected);
+    state.SetPose(lio_->LidarPoseToImuPose(corrected));
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
                          "[NDT-Good] drift corrected: dt=%.3f m, dr=%.2f deg, confidence=%.3f",
                          delta.translation().norm(), delta.so3().log().norm() * 180.0 / M_PI, res.confidence);
@@ -438,7 +662,7 @@ void LocLiteNode::MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, dou
 void LocLiteNode::PublishPose(const NavState& state) {
     const double ts = state.timestamp_;
     const rclcpp::Time stamp = ToRosTime(ts);
-    const SE3 T_map_lidar = state.GetPose();
+    const SE3 T_map_lidar = lio_->ImuPoseToLidarPose(state.GetPose());
     // 补偿 base_link → lidar 外参: T_map_base = T_map_lidar × T_lidar_base
     const SE3 T_map_base = T_map_lidar * T_lidar_base_;
     marker_pose_ = T_map_lidar;

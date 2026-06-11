@@ -28,6 +28,7 @@
 #include "ndt/ndt_corrector.hpp"
 #include "system/lite_pose_smoother.hpp"
 #include "system/loclite_state_machine.hpp"
+#include "system/stability_gate.hpp"
 
 namespace hikari::loclite {
 
@@ -61,8 +62,12 @@ class LocLiteNode : public rclcpp::Node {
 
     /// 一帧 lidar 完整处理: LIO → /initialpose sticky retry → 状态机驱动 → 发布 (持锁)
     void ProcessFrame();
-    /// /initialpose pending pose 的单帧 NDT 验证 (持锁, ProcessFrame 内调用)
+    /// /initialpose pending pose 的累积点云 NDT 验证 (持锁, ProcessFrame 内调用)
     void HandlePendingInitPose(const CloudPtr& scan, double ts);
+    bool UpdatePendingInitPoseWithGravity();
+    void ResetInitAccumulation();
+    bool AccumulateInitScan(const CloudPtr& scan, double ts);
+    CloudPtr BuildInitAccumulatedCloud() const;
     /// Good 态低频 NDT 漂移校正 (按时间间隔节流, 设计文档第 14 节)
     void MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, double ts);
 
@@ -87,8 +92,15 @@ class LocLiteNode : public rclcpp::Node {
     double external_pose_blackout_sec_ = 5.0;
     double lost_timeout_sec_ = 5.0;
     int init_max_retries_ = 5;
+    bool init_accum_enabled_ = true;
+    int init_accum_min_frames_ = 10;
+    int init_accum_min_points_ = 8000;
+    double init_accum_window_sec_ = 2.0;
+    double init_accum_max_wait_sec_ = 5.0;
+    double init_accum_voxel_leaf_ = 0.1;
     double ndt_good_rate_hz_ = 1.0;
     double ndt_gain_good_ = 0.5;
+    bool stability_gate_enabled_ = true;  // system.stability_gate_enabled: false 时验证通过即直接 Good
     bool publish_tf_ = true;    // runtime.publish_tf: map→base_link 与 lidar→level TF
     bool publish_odom_ = true;  // runtime.publish_odom: hikari_loc/odom
     bool publish_path_ = true;  // runtime.publish_path: hikari_loc/path (契约默认开启)
@@ -99,8 +111,16 @@ class LocLiteNode : public rclcpp::Node {
     std::mutex mutex_;
     bool lio_has_output_ = false;       // LIO 是否产出过至少一帧 (即"LIO 就绪")
     bool has_pending_init_pose_ = false;
-    SE3 pending_init_pose_;             // /initialpose 注入的 T_map_lidar, sticky retry 用
+    Vec3d pending_init_base_position_ = Vec3d::Zero();  // /initialpose 的 map-frame base position
+    double pending_init_yaw_ = 0.0;                     // /initialpose 的 map-frame yaw
+    bool pending_init_pose_gravity_ready_ = false;      // 已用当前 lidar roll/pitch 补偿
+    SE3 pending_init_pose_;                             // 补偿后的 T_map_lidar, FC/NDT 用
     int init_retry_count_ = 0;
+    CloudPtr init_accum_cloud_{new PointCloudType()};
+    int init_accum_frames_ = 0;
+    int init_accum_points_ = 0;
+    double init_accum_first_ts_ = -1.0;
+    double init_accum_window_start_ts_ = -1.0;
     double blackout_deadline_sec_ = 0.0;  // TODO(P5): SC 接入后用于阻断 blackout 窗口内的 SC 抢注
     double lost_enter_ts_ = -1.0;         // Lost 进入时刻 (传感器时间), 供 lost_timeout_sec 计时
     double last_ndt_correct_ts_ = -1.0;   // Good 态 NDT 校正节流时刻
@@ -114,6 +134,7 @@ class LocLiteNode : public rclcpp::Node {
     NdtCorrector::Ptr ndt_;
     LitePoseSmoother smoother_;
     LocLiteStateMachine state_machine_;
+    StabilityGate stability_gate_;  // Initializing → Good 放行门控 (持锁访问)
     GravityAlignmentFilter gravity_filter_;
 
     // --- ROS 接口 ---
