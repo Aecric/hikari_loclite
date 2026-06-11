@@ -71,6 +71,8 @@ class LocLiteNode : public rclcpp::Node {
     /// loc_state + ndt_status + loc_status marker
     void PublishStatusTopics(double ts);
     void PublishStatusMarker(double ts);
+    /// 发布降采样后的全局 PCD 地图到 /pcdmap (transient_local, 供 RViz 定位验证)
+    void PublishPcdMap();
     /// lidar_frame → level_frame 重力对齐 TF (每条 IMU 后调用, 持锁)
     void PublishLevelFrameTF(const NavState& state);
 
@@ -90,6 +92,7 @@ class LocLiteNode : public rclcpp::Node {
     bool publish_tf_ = true;    // runtime.publish_tf: map→base_link 与 lidar→level TF
     bool publish_odom_ = true;  // runtime.publish_odom: hikari_loc/odom
     bool publish_path_ = true;  // runtime.publish_path: hikari_loc/path (契约默认开启)
+    bool publish_pcdmap_ = false;  // runtime.publish_pcdmap: /pcdmap 原始 PCD 降采样地图
     static constexpr size_t kMaxPathPoses = 5000;
 
     // --- 运行时状态 (mutex_ 保护) ---
@@ -124,6 +127,7 @@ class LocLiteNode : public rclcpp::Node {
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr loc_state_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr ndt_status_pub_;
     rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr loc_status_marker_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pcd_map_pub_;
     rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr sc_accum_cloud_pub_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr sc_candidates_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr sc_init_guess_pub_;

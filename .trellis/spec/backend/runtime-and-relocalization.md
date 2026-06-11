@@ -20,6 +20,73 @@ It publishes:
 - TF when configured
 - optional path/debug output only when configured
 
+## Scenario: Optional PCD Map Debug Publisher
+
+### 1. Scope / Trigger
+
+- Trigger: runtime needs a fixed-map visualization topic so online and offline
+  localization can be compared against the loaded global PCD in RViz.
+- Owner: `LocLiteNode`, because online and offline runners both call
+  `LocLiteNode::Init()`.
+
+### 2. Signatures
+
+- YAML key: `runtime.publish_pcdmap: bool`
+- ROS topic: `/pcdmap`
+- Message type: `sensor_msgs::msg::PointCloud2`
+
+### 3. Contracts
+
+- When `runtime.publish_pcdmap` is `true`, publish the loaded fixed-map cloud
+  once after map loading and publisher creation.
+- The published cloud must use `header.frame_id = common.map_frame_id`
+  (default `map`).
+- The cloud must be the global PCD after `fixed_map.voxel_leaf` downsampling,
+  not a local cropped iVox view and not live scan accumulation.
+- The publisher QoS must be `reliable + transient_local` with depth 1 so RViz
+  can subscribe after startup and still receive the map.
+- The topic name is fixed as `/pcdmap`; do not remap it through another config
+  key unless the external validation contract changes.
+
+### 4. Validation & Error Matrix
+
+- Config key missing -> default disabled, no warning.
+- Config key false -> do not publish `/pcdmap`.
+- Fixed map cloud missing or empty while enabled -> warn once and continue
+  localization startup.
+- PCD load failure -> existing fixed-map load path returns `false`; node init
+  fails before `/pcdmap` publish.
+
+### 5. Good/Base/Bad Cases
+
+- Good: `publish_pcdmap: true`, valid `global.pcd` -> `/pcdmap` latched in
+  `map` frame with downsampled points.
+- Base: `publish_pcdmap: false` -> no extra map topic, normal localization
+  behavior unchanged.
+- Bad: publishing a cropped local map or current scan on `/pcdmap` -> RViz
+  comparison becomes misleading and violates the fixed-map invariant.
+
+### 6. Tests Required
+
+- Build: run the containerized Release build from the Build And Dependencies
+  spec.
+- Static check: `git diff --check`.
+- Runtime smoke when a map is available: enable `runtime.publish_pcdmap`,
+  start online or offline node, and assert `ros2 topic echo --once /pcdmap`
+  reports `header.frame_id` equal to `common.map_frame_id`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Publishing `/pcdmap` from a live scan, an accumulated scan context cloud, or a
+locally cropped map.
+
+#### Correct
+
+Publishing `FastLioFixedMap::FixedMapCloud()` after the fixed map has been
+loaded and downsampled by the configured voxel leaf.
+
 Config should be provided via a `config_path` ROS parameter and parsed from a
 YAML file like `config/loclite_livox.yaml`.
 

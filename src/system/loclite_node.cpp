@@ -1,6 +1,7 @@
 #include "system/loclite_node.hpp"
 #include "math/loclite_math.hpp"
 
+#include <pcl_conversions/pcl_conversions.h>
 #include <yaml-cpp/yaml.h>
 
 #include <algorithm>
@@ -95,6 +96,7 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
             publish_tf_ = rt["publish_tf"].as<bool>(true);
             publish_odom_ = rt["publish_odom"].as<bool>(true);
             publish_path_ = rt["publish_path"].as<bool>(true);
+            publish_pcdmap_ = rt["publish_pcdmap"].as<bool>(false);
         }
         if (yaml["ndt"]) {
             ndt_good_rate_hz_ = yaml["ndt"]["good_rate_hz"].as<double>(1.0);
@@ -182,6 +184,9 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
     loc_state_pub_ = create_publisher<std_msgs::msg::Int32>("hikari_loc/loc_state", 10);
     ndt_status_pub_ = create_publisher<std_msgs::msg::Int32>("hikari_loc/ndt_status", 10);
     loc_status_marker_pub_ = create_publisher<visualization_msgs::msg::Marker>("hikari_loc/loc_status", 10);
+    pcd_map_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+        "/pcdmap", rclcpp::QoS(1).reliable().transient_local());
+    PublishPcdMap();
 
     // SC 重定位调试话题: 先建话题面 (QoS 1, 仅在有订阅者时发布)
     // TODO(P5): SC 重定位管线 (RelocManager) 接入后, 按 lightning SetScDebugCallback 的格式
@@ -543,6 +548,30 @@ void LocLiteNode::PublishStatusMarker(double ts) {
     }
     marker.color.a = 1.0;
     loc_status_marker_pub_->publish(marker);
+}
+
+void LocLiteNode::PublishPcdMap() {
+    if (!publish_pcdmap_) {
+        return;
+    }
+    if (!pcd_map_pub_) {
+        RCLCPP_WARN(this->get_logger(), "/pcdmap publisher is not ready");
+        return;
+    }
+    const CloudPtr map_cloud = lio_ ? lio_->FixedMapCloud() : nullptr;
+    if (!map_cloud || map_cloud->empty()) {
+        RCLCPP_WARN(this->get_logger(), "skip /pcdmap publish: fixed map cloud is empty");
+        return;
+    }
+
+    sensor_msgs::msg::PointCloud2 msg;
+    pcl::toROSMsg(*map_cloud, msg);
+    msg.header.stamp = this->now();
+    msg.header.frame_id = map_frame_id_;
+    pcd_map_pub_->publish(msg);
+
+    RCLCPP_INFO(this->get_logger(), "Published /pcdmap: frame=%s, points=%zu", map_frame_id_.c_str(),
+                map_cloud->size());
 }
 
 void LocLiteNode::PublishLevelFrameTF(const NavState& state) {

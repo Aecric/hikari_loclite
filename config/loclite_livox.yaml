@@ -28,6 +28,7 @@ runtime:
   publish_tf: true                      # map→base_link 与 lidar_frame→level_frame TF
   publish_odom: true                    # hikari_loc/odom
   publish_path: true                    # hikari_loc/path (0.1s 节流, 上限 5000; 契约接口默认开启)
+  publish_pcdmap: false                 # 是否发布 /pcdmap: 原始 global.pcd 按 fixed_map.voxel_leaf 降采样后发布到 map frame, 供定位匹配验证
 
 fixed_map:
   global_pcd: "/root/slam_ws/data/new_map/global.pcd"
