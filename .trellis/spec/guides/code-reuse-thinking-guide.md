@@ -1,105 +1,56 @@
 # Code Reuse Thinking Guide
 
-> **Purpose**: Stop and think before creating new code - does it already exist?
+Use this guide before adding helpers, constants, point types, filters, map
+structures, or conversions. In this project, duplicated localization logic often
+causes inconsistent frame handling, timestamp handling, or validation thresholds.
 
----
+## Search First
 
-## The Problem
-
-**Duplicated code is the #1 source of inconsistency bugs.**
-
-When you copy-paste or rewrite existing logic:
-- Bug fixes don't propagate
-- Behavior diverges over time
-- Codebase becomes harder to understand
-
----
-
-## Before Writing New Code
-
-### Step 1: Search First
+Use `rg` before creating new code:
 
 ```bash
-# Search for similar function names
-grep -r "functionName" .
-
-# Search for similar logic
-grep -r "keyword" .
+rg "topic_or_config_key|threshold|function_name|point_type" .
 ```
 
-### Step 2: Ask These Questions
+Search likely owners:
 
-| Question | If Yes... |
-|----------|-----------|
-| Does a similar function exist? | Use or extend it |
-| Is this pattern used elsewhere? | Follow the existing pattern |
-| Could this be a shared utility? | Create it in the right place |
-| Am I copying code from another file? | **STOP** - extract to shared |
+- `include/hikari_loclite/common/` for point types, Eigen aliases, constants,
+  IMU/odom/nav-state data structures.
+- `include/hikari_loclite/lio/` and `src/lio/` for preprocessing, deskewing,
+  ESKF, and Scan Context behavior.
+- `include/hikari_loclite/ivox3d/` for nearest-neighbor and voxel-map behavior.
+- `include/hikari_loclite/ndt/` and `src/ndt/` for NDT and voxel covariance.
+- `CMakeLists.txt`, `package.xml`, config, and launch files before changing
+  dependencies, topics, frame IDs, or install paths.
 
----
+## Reuse Rules
 
-## Common Duplication Patterns
+- Prefer extending existing point conversion and custom point definitions in
+  `common/point_def.h` over adding one-off point structs.
+- Prefer adding an option to the existing config model over hardcoding a second
+  copy of a threshold.
+- Prefer adapting current iVox/NDT/SC wrappers over introducing another
+  nearest-neighbor or registration stack.
+- If copying from `lightning-lm`, copy the smallest algorithm slice and document
+  why the full framework dependency is still avoided.
 
-### Pattern 1: Copy-Paste Functions
+## When To Abstract
 
-**Bad**: Copying a validation function to another file
+Abstract when the same logic appears in multiple runtime paths:
 
-**Good**: Extract to shared utilities, import where needed
+- PointCloud2/Livox conversion preserves the same fields.
+- Candidate pose validation is used by `/initialpose` and SC relocalization.
+- Frame and timestamp handling repeats across publishers or callbacks.
+- Config parsing repeats for the same YAML group.
 
-### Pattern 2: Similar Components
+Do not abstract a one-off hot-path loop if the abstraction adds allocation,
+virtual dispatch, or unclear ownership.
 
-**Bad**: Creating a new component that's 80% similar to existing
+## Checklist
 
-**Good**: Extend existing component with props/variants
-
-### Pattern 3: Repeated Constants
-
-**Bad**: Defining the same constant in multiple files
-
-**Good**: Single source of truth, import everywhere
-
----
-
-## When to Abstract
-
-**Abstract when**:
-- Same code appears 3+ times
-- Logic is complex enough to have bugs
-- Multiple people might need this
-
-**Don't abstract when**:
-- Only used once
-- Trivial one-liner
-- Abstraction would be more complex than duplication
-
----
-
-## After Batch Modifications
-
-When you've made similar changes to multiple files:
-
-1. **Review**: Did you catch all instances?
-2. **Search**: Run grep to find any missed
-3. **Consider**: Should this be abstracted?
-
----
-
-## Gotcha: Asymmetric Mechanisms Producing Same Output
-
-**Problem**: When two different mechanisms must produce the same file set (e.g., recursive directory copy for init vs. manual `files.set()` for update), structural changes (renaming, moving, adding subdirectories) only propagate through the automatic mechanism. The manual one silently drifts.
-
-**Symptom**: Init works perfectly, but update creates files at wrong paths or misses files entirely.
-
-**Prevention checklist**:
-- [ ] When migrating directory structures, search for ALL code paths that reference the old structure
-- [ ] If one path is auto-derived (glob/copy) and another is manually listed, the manual one needs updating
-- [ ] Add a regression test that compares outputs from both mechanisms
-
----
-
-## Checklist Before Commit
-
-- [ ] Searched for existing similar code
-- [ ] No copy-pasted logic that should be shared
-- [ ] Constants defined in one place
-- [ ] Similar patterns follow same structure
+- [ ] Searched for existing equivalent code.
+- [ ] Constants and config keys have a single owner.
+- [ ] New helpers live in the module that owns the concept.
+- [ ] No new dependency duplicates existing iVox, NDT, PCL, Eigen, or nanoflann
+      roles without profiling evidence.
+- [ ] Copied full-framework code was trimmed to the minimum needed boundary.

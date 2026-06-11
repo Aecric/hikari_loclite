@@ -1,62 +1,43 @@
 # Bootstrap Task: Fill Project Development Guidelines
 
-**You (the AI) are running this task. The developer does not read this file.**
-
-The developer just ran `trellis init` on this project for the first time.
-`.trellis/` now exists with empty spec scaffolding, and this bootstrap task
-exists under `.trellis/tasks/`. When they want to work on it, they should start
-this task from a session that provides Trellis session identity.
-
-**Your job**: help them populate `.trellis/spec/` with the team's real
-coding conventions. Every future AI session — this project's
-`trellis-implement` and `trellis-check` sub-agents — auto-loads spec files
-listed in per-task jsonl manifests. Empty spec = sub-agents write generic
-code. Real spec = sub-agents match the team's actual patterns.
-
-Don't dump instructions. Open with a short greeting, figure out if the repo
-has any existing convention docs (CLAUDE.md, .cursorrules, etc.), and drive
-the rest conversationally.
+This task populates `.trellis/spec/` with real project rules for
+`hikari_loclite`, a standalone ROS2 C++ fixed-map LiDAR localization package.
+The main source document is `hikari_loclite_build_2026-06-10.md`.
 
 ---
 
-## Status (update the checkboxes as you complete each item)
+## Status
 
-- [ ] Fill backend guidelines
-- [ ] Fill frontend guidelines
-- [ ] Add code examples
+- [x] Replace generic backend template with ROS2/C++ SLAM guidelines
+- [x] Remove non-applicable frontend/database template specs
+- [x] Add project-backed examples and references
+- [x] Capture build, dependency, localization, runtime, error, logging, and quality constraints
+- [x] Rewrite generic thinking guides for ROS2/SLAM data flow and reuse checks
 
 ---
 
 ## Spec files to populate
 
 
-### Backend guidelines
+### Runtime C++ / ROS2 guidelines
 
 | File | What to document |
 |------|------------------|
-| `.trellis/spec/backend/directory-structure.md` | Where different file types go (routes, services, utils) |
-| `.trellis/spec/backend/database-guidelines.md` | ORM, migrations, query patterns, naming conventions |
-| `.trellis/spec/backend/error-handling.md` | How errors are caught, logged, and returned |
-| `.trellis/spec/backend/logging-guidelines.md` | Log levels, format, what to log |
-| `.trellis/spec/backend/quality-guidelines.md` | Code review standards, testing requirements |
+| `.trellis/spec/backend/index.md` | Entry point and pre-development checklist |
+| `.trellis/spec/backend/directory-structure.md` | ROS2 package layout, module ownership, forbidden full-framework includes |
+| `.trellis/spec/backend/build-and-dependencies.md` | ament, C++17, PCL/Eigen/OpenMP, dependency allow/deny list |
+| `.trellis/spec/backend/localization-architecture.md` | Fixed-map Fast-LIO, iVox, NDT, Scan Context, non-goals |
+| `.trellis/spec/backend/runtime-and-relocalization.md` | Node contract, state machine, `/initialpose`, LOST recovery, pose gating |
+| `.trellis/spec/backend/error-handling.md` | Return-value conventions and validation gates |
+| `.trellis/spec/backend/logging-guidelines.md` | Runtime logging and hot-path log-rate rules |
+| `.trellis/spec/backend/quality-guidelines.md` | Build command, forbidden patterns, review checklist |
 
 
-### Frontend guidelines
+### Thinking guides
 
-| File | What to document |
-|------|------------------|
-| `.trellis/spec/frontend/directory-structure.md` | Component/page/hook organization |
-| `.trellis/spec/frontend/component-guidelines.md` | Component patterns, props conventions |
-| `.trellis/spec/frontend/hook-guidelines.md` | Custom hook naming, patterns |
-| `.trellis/spec/frontend/state-management.md` | State library, patterns, what goes where |
-| `.trellis/spec/frontend/type-safety.md` | TypeScript conventions, type organization |
-| `.trellis/spec/frontend/quality-guidelines.md` | Linting, testing, accessibility |
-
-
-### Thinking guides (already populated)
-
-`.trellis/spec/guides/` contains general thinking guides pre-filled with
-best practices. Customize only if something clearly doesn't fit this project.
+`.trellis/spec/guides/` was adjusted so thinking triggers reference ROS2
+callbacks, sensor buffers, Fast-LIO, NDT, Scan Context, TF, and config instead
+of web/API/database layers.
 
 ---
 
@@ -117,23 +98,12 @@ is a separate conversation, not a bootstrap concern.
 
 ## Completion
 
-When the developer confirms the checklist items above are done with real
-examples (not placeholders), guide them to run:
+Before archiving this task, verify:
 
 ```bash
-python3 ./.trellis/scripts/task.py finish
-python3 ./.trellis/scripts/task.py archive 00-bootstrap-guidelines
+python3 ./.trellis/scripts/get_context.py --mode packages
+rg -n "To be filled|TODO: fill|placeholder|Replace with your actual" .trellis/spec
 ```
 
-After archive, every new developer who joins this project will get a
-`00-join-<slug>` onboarding task instead of this bootstrap task.
-
----
-
-## Suggested opening line
-
-"Welcome to Trellis! Your init just set me up to help you fill the project
-spec — a one-time setup so every future AI session follows the team's
-conventions instead of writing generic code. Before we start, do you have
-any existing convention docs (CLAUDE.md, .cursorrules, CONTRIBUTING.md,
-etc.) I can pull from, or should I scan the codebase from scratch?"
+The packages command should report only the meaningful spec layers for this
+repository, and the placeholder search should return no template placeholders.

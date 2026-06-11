@@ -972,13 +972,7 @@ colcon build --packages-select hikari_loclite --cmake-args -DCMAKE_BUILD_TYPE=Re
 
 ```bash
 source /home/aecriclin/3d_slam_ws/install/setup.bash
-ros2 run hikari_loclite run_loclite_online --ros-args -p config_path:=/home/ubuntu/hikari_loclite/config/loclite_livox.yaml
-```
-
-或：
-
-```bash
-ros2 launch hikari_loclite loclite.launch.py config:=/home/ubuntu/hikari_loclite/config/loclite_livox.yaml
+ros2 run hikari_loclite run_loclite_online --config <yaml> --map_path <map_path>
 ```
 
 如果使用 CPU 亲和性 / 实时调度：
@@ -1123,3 +1117,118 @@ Good 后无重定位线程、无 PGO、无动态地图
 - 部署更清楚。
 - CPU 预算更可控。
 - full 系统仍可保留为建图、调试、回归验证工具。
+
+
+## 21.与 Lighting的接口验证
+
+我们约定 hikari_loclite 的启动参数和上抛ROS2话题和TF行为树与 lightning 定位模式 一致，即可做到直接替换现有lightning 定位模式做验证。
+
+即有:
+
+### `run_loc_offline` — 离线定位评估
+
+注入 rosbag 数据与先验地图，用于评估定位精度与算法稳定性。
+
+```bash
+ros2 run hikari_loclite run_loclite_offline --config <yaml> --input_bag <bag>
+```
+
+#### 定位模式 (`run_loc_online`)
+
+```bash
+ros2 run hikari_loclite run_loclite_online --config <yaml> --map_path <map_path>
+```
+
+
+| 话题名                       | 消息类型                         | 说明                                                                                                         |
+| ---------------------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `hikari_loc/path`             | `nav_msgs/Path`                  | 定位输出轨迹路径，Frame:`map`。最大保存 5000 个位姿。                                                        |
+| `hikari_loc/loc_state`        | `std_msgs/Int32`                 | 定位状态枚举整数：0=IDLE, 1=INITIALIZING, 2=GOOD, 3=DEGRADED, 4=LOST, 5=WAIT_FOR_INITIALPOSE                  |
+| `hikari_loc/ndt_status`       | `std_msgs/Int32`                 | 当前 NDT 级联层级：0=默认 1.0m, 1=级联模式                                                                   |
+| `hikari_loc/loc_status`       | `visualization_msgs/Marker`      | RViz 文本标记，显示定位状态文字（GOOD/DEGRADED/INIT/LOST/`WAIT FOR /initialpose`）与置信度值，颜色编码：绿/黄/蓝/红/紫 |
+| `hikari_loc/sc/accum_cloud`   | `sensor_msgs/PointCloud2`        | ScanContext 累积点云（重力对齐后），调试用。仅在有订阅者时发布。                                             |
+| `hikari_loc/sc/candidates`    | `visualization_msgs/MarkerArray` | ScanContext 候选位姿箭头：绿=胜出，白=拒绝，红=重力检查失败。仅在有订阅者时发布。                            |
+| `hikari_loc/sc/init_guess`    | `geometry_msgs/PoseStamped`      | ScanContext 初始猜测位姿（胜出的 SC 候选）。仅在有订阅者时发布。                                             |
+| `hikari_loc/sc/gravity_check` | `std_msgs/Float32MultiArray`     | SC 重力一致性检查结果：`[roll_err_deg, pitch_err_deg, passed]`，`passed` 为 1.0 或 0.0。仅在有订阅者时发布。 |
+
+
+### TF 变换广播
+
+
+| 父 Frame      | 子 Frame      | 节点                              | 说明                                                                                                   |
+| ------------- | ------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `lidar_frame` | `level_frame` | `run_loclite_online` | 重力对齐水平坐标系，纯旋转变换。Frame ID 可由`system.lidar_frame_id` 和 `system.level_frame_id` 配置。 |
+| `map`         | `base_link`   | `run_loclite_online`                   | 定位输出位姿（补偿了 base_link → lidar 外参后的真实 base_link 位姿）。
+
+默认使用lightning的地图格式 map_path 传入地图文件夹:
+```
+data/new_map/
+├── global.pcd          # 全局点云地图
+├── map.pgm             # 2D 栅格地图（pgm 格式）
+├── map.yaml            # 2D 地图元数据（分辨率、原点等）
+├── poses.txt           # 关键帧位姿序列
+├── sc_database.bin     # Scan Context 数据库（定位时使用）
+├── keyframes/          # 关键帧点云目录
+└── <tiles>/            # 分块瓦片点云
+```
+### 定位状态机
+
+系统定义了以下定位状态（通过 `hikari_loc/loc_state` 话题发布）：
+
+
+| 状态值 | 状态名                 | 说明                                                                                |
+| ------ | ---------------------- | ----------------------------------------------------------------------------------- |
+| 0      | IDLE                   | 空闲，等待初始化                                                                    |
+| 1      | INITIALIZING           | 正在初始化（NDT 匹配 / 稳定门控未放行 / SC 重定位中）                               |
+| 2      | GOOD                   | 定位正常                                                                            |
+| 3      | DEGRADED               | 定位退化（跟踪质量下降但仍在运行）                                                  |
+| 4      | LOST                   | 定位丢失（系统内部仍在尝试 SC / FP 自救，未超 `lost_timeout_sec` 时长）             |
+| 5      | WAIT_FOR_INITIALPOSE   | LOST 超时或 FP 兜底超时后冻结后端，**仅接受外部 `/initialpose`**。1Hz 节流持续上报。|
+
+> 状态升级规则: LOST 持续 > `lost_timeout_sec`、或 SC 耗尽后 FP 兜底超过 `fp_fallback_timeout_sec` → 进入 WAIT_FOR_INITIALPOSE。RViz 紫色 marker `WAIT FOR /initialpose` 即此状态。
+
+
+### 初始位姿注入 (`/initialpose`)
+
+`/initialpose` 在系统中被视作 **"指令" (command)**，不是"建议"。语义保证如下:
+
+1. **限次重试 (sticky retry)** — FC 单帧拒绝不会立刻丢弃 pose。`lidar_loc.init_max_retries` 次内会用后续帧的新 scan 反复重试同一 pose，直到通过或耗尽。
+2. **不会跌落到 FP 暴力搜索** — 即使所有重试失败，系统也不会去地图里找另一个 NDT 分高的关键帧覆盖用户意图。FP 暴力搜索仅在用户从未给过 `/initialpose` 的冷启动场景下运行。
+3. **SC blackout 窗口 (`system.external_pose_blackout_sec`)** — 注入后此秒数内禁止 SC worker 抢注：`ScanContextReloc` 入口阻断 + SC inflight job 即便算完也丢弃，让用户的 pose 拥有独占试错窗口。
+4. **状态机原子复位** — WAIT / LOST / SC 失败计数 / FP 超时计时器全部清零；`StabilityGate` re-arm。
+
+注入方式:
+
+```bash
+# RViz "2D Pose Estimate" 工具最常用; 或手动:
+ros2 topic pub --once /initialpose geometry_msgs/PoseWithCovarianceStamped \
+  "{header: {frame_id: 'map'}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}}}"
+```
+
+注入后日志关键字 (按出现顺序):
+
+| 日志 | 含义 |
+|---|---|
+| `[ExtPose] /initialpose 已接入 (t=...): ... blackout 窗口至 t=...` | SetExternalPose 落地，blackout 起止时间 |
+| `Set initial pose is: [...]` | LidarLoc 接收到指令 |
+| `[ExtPose] 处于 blackout 窗口, 本帧跳过 SC 全流程` | 每 20 帧节流，确认 force_fc 持续生效 |
+| `[FC-Init] FC 拒绝本帧, 保留 init pose 用下一帧重试 (k/N)` | 单帧失败，正在重试 |
+| `init with external pose: [...] (after k retries)` | 第 k 次重试成功 |
+| `[FC-Init] /initialpose 重试 N 次仍失败, 放弃, 通知上层 rearm` | N 次仍失败 |
+| `[SC-Reloc/worker] 处于 /initialpose blackout 窗口 ..., 丢弃本次 SC 注入` | SC inflight job 被 blackout 拦掉 |
+
+### 手动 SC 重定位
+
+当定位丢失且不便用 RViz 时，可手动触发 ScanContext 重定位：
+
+```bash
+ros2 service call /hikari_loc/sc_reloc std_srvs/srv/Trigger "{}"
+```
+
+> 注意: 该服务路径**绕过 blackout 窗口**（用户显式触发即视为授权抢注）。
+
+
+
+## 注意 在release模式下 offline节点不编译 在 release 模式下也不带编译Pangolin UI
+
+> 要求在非 release模式下编译 Pangolin UI 且 UI行为与 Lighting 一致，用于测试调试。

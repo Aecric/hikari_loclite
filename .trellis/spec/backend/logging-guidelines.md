@@ -1,51 +1,42 @@
 # Logging Guidelines
 
-> How logging is done in this project.
+The extracted algorithm code uses a lightweight stream-style logging shim in
+`include/hikari_loclite/log.h`. ROS2 node orchestration code may use `RCLCPP_*`
+macros when a node logger is available.
 
----
+## What To Log
 
-## Overview
+- Initialization failure: missing config path, missing map path, PCD load
+  failure, missing SC database, invalid calibration values.
+- State transitions: Uninitialized, Initializing, Good, Degraded, Lost, and
+  WaitForInitialPose, including the reason string.
+- Validation rejection: NDT confidence below threshold, correction too large,
+  empty cloud, or invalid relocalization candidate.
+- One-time or rate-limited performance warnings: scan processing over budget,
+  SC query timeout, repeated IMU timestamp anomalies.
 
-<!--
-Document your project's logging conventions here.
+Existing examples:
 
-Questions to answer:
-- What logging library do you use?
-- What are the log levels and when to use each?
-- What should be logged?
-- What should NOT be logged (PII, secrets)?
--->
+- `src/lio/eskf.cc` logs non-finite covariance and rejected ESKF updates.
+- `include/hikari_loclite/lio/imu_processing.hpp` logs abnormal IMU timing and
+  IMU initialization progress.
+- `src/lio/scan_context.cc` logs successful SC database load.
 
-(To be filled by the team)
+## Hot-Path Rules
 
----
+- Do not log every point, every nearest-neighbor query, or every ESKF
+  iteration in normal operation.
+- Use `LOG_EVERY_N(...)` or ROS2 throttled logging for repeated callbacks.
+- Keep logs deterministic and short enough for embedded devices.
 
-## Log Levels
+## Severity
 
-<!-- When to use each level: debug, info, warn, error -->
+- `INFO`: startup, map load summary, SC database load, successful major state
+  transition.
+- `WARNING`: recoverable quality degradation, rejected candidate, abnormal but
+  non-fatal sensor timing.
+- `ERROR`: initialization failure, invalid required configuration, failed map
+  load, rejected ESKF update that prevents the frame from being used.
 
-(To be filled by the team)
-
----
-
-## Structured Logging
-
-<!-- Log format, required fields -->
-
-(To be filled by the team)
-
----
-
-## What to Log
-
-<!-- Important events to log -->
-
-(To be filled by the team)
-
----
-
-## What NOT to Log
-
-<!-- Sensitive data, PII, secrets -->
-
-(To be filled by the team)
+Do not add glog as a dependency just to satisfy extracted `LOG(...)` calls; use
+the local shim unless there is a deliberate dependency decision.

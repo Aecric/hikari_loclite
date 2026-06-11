@@ -22,8 +22,8 @@
   "parent": null,
   "relatedFiles": [
     ".trellis/spec/backend/",
-    ".trellis/spec/frontend/"
+    ".trellis/spec/guides/"
   ],
-  "notes": "First-time setup task created by trellis init (fullstack project)",
+  "notes": "First-time setup task repurposed for the standalone ROS2 SLAM/localization package. Frontend template specs were removed because this project has no frontend layer.",
   "meta": {}
 }

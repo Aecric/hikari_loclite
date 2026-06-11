@@ -1,0 +1,76 @@
+# hikari_loclite configuration for Livox Mid360
+
+common:
+  livox_lidar_topic: "/livox/lidar"
+  pointcloud_topic: "/cloud"
+  imu_topic: "/livox/imu"
+  map_frame_id: "map"
+
+system:
+  map_path: ""                          # lightning 地图目录 (含 global.pcd / sc_database.bin 等); 为空时退回 fixed_map.global_pcd; CLI --map_path 优先级最高
+  lidar_frame_id: "lidar_frame"         # 雷达坐标系名称 (level_frame TF 的父 frame / odom 的 child frame)
+  level_frame_id: "level_frame"         # 重力对齐水平坐标系名称 (纯旋转 TF 的子 frame)
+  base_frame_id: "base_link"            # map → base_link TF 的子 frame
+  base_to_lidar_x: 0.0                  # base_link → lidar 外参平移 x (m)
+  base_to_lidar_y: 0.0                  # base_link → lidar 外参平移 y (m)
+  base_to_lidar_z: 0.0                  # base_link → lidar 外参平移 z (m)
+  base_to_lidar_roll: 0.0               # base_link → lidar 外参旋转 roll (rad), R = Rz(yaw)·Ry(pitch)·Rx(roll)
+  base_to_lidar_pitch: 0.0              # base_link → lidar 外参旋转 pitch (rad)
+  base_to_lidar_yaw: 0.0                # base_link → lidar 外参旋转 yaw (rad)
+  external_pose_blackout_sec: 5.0       # /initialpose 注入后 SC 抢注阻断窗口 (秒, P5 SC 管线接入后生效)
+  lost_timeout_sec: 5.0                 # Lost 持续超过该时长才转 WAIT_FOR_INITIALPOSE
+  level_frame_cutoff_freq: 0.5          # 重力对齐低通滤波截止频率 (Hz)
+
+reloc:
+  init_max_retries: 5                   # /initialpose sticky retry 最大重试次数, 超过后放弃回 WAIT_FOR_INITIALPOSE
+
+runtime:
+  publish_tf: true                      # map→base_link 与 lidar_frame→level_frame TF
+  publish_odom: true                    # hikari_loc/odom
+  publish_path: true                    # hikari_loc/path (0.1s 节流, 上限 5000; 契约接口默认开启)
+
+fixed_map:
+  global_pcd: "/root/slam_ws/data/new_map/global.pcd"
+  voxel_leaf: 0.2
+  crop_radius_m: 30.0
+  max_points: 800000
+
+fast_lio:
+  filter_size_scan: 0.2
+  filter_size_map: 0.2
+  ivox_grid_resolution: 0.2
+  ivox_nearby_type: 18
+  max_iteration: 4
+  min_pts: 300
+  blind: 0.5
+  max_range: 60.0
+  lidar_type: 1
+  scan_line: 6
+  point_filter_num: 2
+  time_scale: 0.001
+  extrinsic_T: [-0.011, -0.02329, 0.04412]
+  extrinsic_R: [1,0,0, 0,1,0, 0,0,1]
+  gyr_cov: 0.01
+  acc_cov: 0.01
+  use_aa: false
+  imu_filter: false
+  skip_lidar_num: 0
+  kf_dis_th: 2.0
+  kf_angle_th: 15.0
+  enable_icp_part: false
+  proj_kfs: false
+  esti_plane_threshold: 0.1
+
+roi:
+  height_max: 3.0
+  height_min: -3.0
+
+ndt:
+  enabled: true
+  threads: 1
+  resolution: 1.0
+  min_confidence: 1.0
+  max_delta_trans_m: 1.0
+  max_delta_rot_deg: 10.0
+  good_rate_hz: 1.0                     # GOOD 态低频 NDT 漂移校正频率 (Hz, 按时间间隔判断而非帧数)
+  gain_good: 0.5                        # GOOD 态 NDT 校正增益 (0~1, 增益混合后 ResetToMapPose)
