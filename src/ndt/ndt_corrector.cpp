@@ -39,6 +39,10 @@ bool NdtCorrector::Init(const std::string& yaml_path) {
             // inlier 覆盖率正交门 (Phase1): <=0 关闭, 仅记录 inlier_ratio 供标定
             min_inlier_ratio_ = ndt["min_inlier_ratio"].as<double>(0.0);
             inlier_dist_m_ = ndt["inlier_dist_m"].as<double>(1.0);
+            // Phase2: 退化检测 knobs (Hessian 特征值分析)
+            degeneracy_ratio_threshold_ = ndt["degeneracy_ratio_threshold"].as<double>(50.0);
+            degeneracy_min_ev_threshold_ = ndt["degeneracy_min_ev_threshold"].as<double>(10.0);
+            degeneracy_reject_in_validate_ = ndt["degeneracy_reject_in_validate"].as<bool>(true);
         }
     } catch (...) {
         LOG(ERROR) << "NdtCorrector: failed to load ndt config from " << yaml_path;
@@ -48,7 +52,10 @@ bool NdtCorrector::Init(const std::string& yaml_path) {
     LOG(INFO) << "NdtCorrector: resolution=" << resolution_ << ", threads=" << threads_
               << ", source_leaf=" << source_leaf_ << ", min_confidence(TP)=" << min_confidence_
               << ", max_delta=" << max_delta_trans_m_ << "m/" << max_delta_rot_deg_ << "deg"
-              << ", min_inlier_ratio=" << min_inlier_ratio_ << ", inlier_dist_m=" << inlier_dist_m_;
+              << ", min_inlier_ratio=" << min_inlier_ratio_ << ", inlier_dist_m=" << inlier_dist_m_
+              << ", degeneracy_ratio_thres=" << degeneracy_ratio_threshold_
+              << ", degeneracy_min_ev_thres=" << degeneracy_min_ev_threshold_
+              << ", degeneracy_reject_in_validate=" << (degeneracy_reject_in_validate_ ? "true" : "false");
     return true;
 }
 
@@ -147,7 +154,23 @@ NdtResult NdtCorrector::Align(const CloudPtr& scan, const SE3& guess) {
     result.delta_rot_deg = delta.so3().log().norm() * 180.0 / M_PI;
     // inlier 覆盖率: 用收敛位姿 (而非 guess) 把降采样源点投到 target 系统计近邻覆盖率
     result.inlier_ratio = ComputeInlierRatio(filtered, result.pose);
-    // Align 的 valid 仅表示"收敛且有输出"; TP/delta/inlier 门限在 Validate (或调用方) 判定
+
+    // Phase2: 退化检测 — 收敛后提取 Hessian 做特征值分析, 判断退化场景 (长走廊/平面/开阔地)
+    // pclomp NDT 在 computeTransformation 末尾已存储 Hessian, 这里直接取用
+    const Eigen::Matrix<double, 6, 6> H = ndt_->getHessionMatrix();
+    const DegeneracyResult degen = DegeneracyEigenCheck(
+        H, degeneracy_ratio_threshold_, degeneracy_min_ev_threshold_);
+    result.degenerate = degen.is_degenerated;
+    result.trans_condition_ratio = degen.trans_condition_ratio;
+    result.rot_condition_ratio = degen.rot_condition_ratio;
+    if (degen.is_degenerated) {
+        LOG(WARNING) << "NdtCorrector: degeneracy detected — trans_condition_ratio="
+                     << degen.trans_condition_ratio << " (lambda_min=" << degen.trans_lambda_min
+                     << "), rot_condition_ratio=" << degen.rot_condition_ratio
+                     << " (lambda_min=" << degen.rot_lambda_min << ")";
+    }
+
+    // Align 的 valid 仅表示"收敛且有输出"; TP/delta/inlier/退化门限在 Validate (或调用方) 判定
     result.valid = true;
     return result;
 }
@@ -159,25 +182,32 @@ NdtResult NdtCorrector::Validate(const SE3& candidate_pose, const CloudPtr& scan
         return result;
     }
 
-    // 门限判定: TP + delta (主门), 外加 inlier 覆盖率正交门 (Phase1; min_inlier_ratio_<=0 时关闭).
-    // 拒绝日志带 TP/delta/inlier 数值, 便于现场标定阈值.
+    // 门限判定: TP + delta (主门), inlier 覆盖率正交门 (Phase1), 退化检测 (Phase2).
+    // 拒绝日志带 TP/delta/inlier/退化数值, 便于现场标定阈值.
     const bool conf_ok = result.confidence >= min_confidence_;
     const bool delta_ok =
         result.delta_trans_m <= max_delta_trans_m_ && result.delta_rot_deg <= max_delta_rot_deg_;
     const bool inlier_ok = min_inlier_ratio_ <= 0.0 || result.inlier_ratio >= min_inlier_ratio_;
-    if (!conf_ok || !delta_ok || !inlier_ok) {
-        LOG(WARNING) << "NdtCorrector: validate rejected: TP=" << result.confidence
+    const bool degen_ok = !degeneracy_reject_in_validate_ || !result.degenerate;
+    if (!conf_ok || !delta_ok || !inlier_ok || !degen_ok) {
+        LOG(WARNING) << "NdtCorrector: validate rejected"
+                     << (degen_ok ? "" : " (degenerate)")
+                     << ": TP=" << result.confidence
                      << " (min=" << min_confidence_ << "), delta=" << result.delta_trans_m << "m/"
                      << result.delta_rot_deg << "deg (max=" << max_delta_trans_m_ << "m/"
                      << max_delta_rot_deg_ << "deg), inlier=" << result.inlier_ratio
-                     << " (min=" << min_inlier_ratio_ << ")";
+                     << " (min=" << min_inlier_ratio_ << ")"
+                     << ", trans_cr=" << result.trans_condition_ratio
+                     << ", rot_cr=" << result.rot_condition_ratio;
         result.valid = false;
         return result;
     }
 
     LOG(INFO) << "NdtCorrector: validate accepted: TP=" << result.confidence
               << ", delta=" << result.delta_trans_m << "m/" << result.delta_rot_deg
-              << "deg, inlier=" << result.inlier_ratio;
+              << "deg, inlier=" << result.inlier_ratio
+              << ", trans_cr=" << result.trans_condition_ratio
+              << ", rot_cr=" << result.rot_condition_ratio;
     return result;
 }
 

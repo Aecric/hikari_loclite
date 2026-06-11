@@ -11,6 +11,7 @@
 
 #include "common/eigen_types.h"
 #include "common/point_def.h"
+#include "ndt/degeneracy_check.hpp"
 #include "ndt/ndt_omp.h"
 
 namespace hikari::loclite {
@@ -26,6 +27,10 @@ struct NdtResult {
     double inlier_ratio = 0.0;
     double delta_trans_m = 0.0;  // 收敛位姿相对 guess 的平移差 (m)
     double delta_rot_deg = 0.0;  // 收敛位姿相对 guess 的旋转差 (deg)
+    // Phase2: 退化检测 (Hessian 特征值分析, 长走廊/平面/开阔地场景)
+    bool degenerate = false;             // 退化标志 (trans || rot)
+    double trans_condition_ratio = 0.0;  // 平移 Hessian 条件数 (lambda_max/lambda_min)
+    double rot_condition_ratio = 0.0;    // 旋转 Hessian 条件数
 };
 
 /// NDT 校正/验证器: 低频漂移校正 (Good 态) 与外部候选位姿验证 (/initialpose, 后续 SC).
@@ -74,6 +79,10 @@ class NdtCorrector {
     double max_delta_rot_deg_ = 10.0;
     double min_inlier_ratio_ = 0.0;  // ndt.min_inlier_ratio: <=0 关闭 inlier 正交门 (仅记录)
     double inlier_dist_m_ = 1.0;     // ndt.inlier_dist_m: inlier 判定距离 (m)
+    // Phase2: 退化检测 knobs
+    double degeneracy_ratio_threshold_ = 50.0;   // lambda_max/lambda_min 超此值判退化 (走廊/平面典型 50~100)
+    double degeneracy_min_ev_threshold_ = 10.0;  // lambda_min 低于此绝对值判退化 (特征值与 TP 同量纲)
+    bool degeneracy_reject_in_validate_ = true;   // Validate 中退化直接拒绝 (init/SC 候选)
 
     NdtType::Ptr ndt_;  // 复用实例; 体素协方差只在 SetMap 建一次
     pcl::KdTreeFLANN<PointType> target_kdtree_;  // SetMap 建一次, 供 ComputeInlierRatio 复用

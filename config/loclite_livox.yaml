@@ -122,6 +122,10 @@ ndt:
   max_delta_rot_deg: 10.0               # Validate: 收敛位姿相对候选 guess 的旋转上限 (deg)
   good_rate_hz: 1.0                     # GOOD 态低频 NDT 漂移校正频率 (Hz, 按时间间隔判断而非帧数)
   gain_good: 0.5                        # GOOD 态 NDT 校正增益 (0~1, 增益混合后 ResetToMapPose)
+  # Phase2: 退化检测 (Hessian 特征值分析, 长走廊/平面/开阔地场景下 NDT 可能收敛到错误解且 TP 仍偏高)
+  degeneracy_ratio_threshold: 50.0      # lambda_max/lambda_min 超此值判退化 (走廊/平面典型 50~100)
+  degeneracy_min_ev_threshold: 10.0     # lambda_min 低于此绝对值判退化 (特征值与 TP 同量纲)
+  degeneracy_reject_in_validate: true   # Validate 中退化直接拒绝 (init/SC 候选)
 
 smoother:
   # LitePoseSmoother 跳变门限 (Phase1 改为可配; 缺省即下列新值).

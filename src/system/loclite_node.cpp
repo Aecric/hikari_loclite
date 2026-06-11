@@ -757,6 +757,14 @@ void LocLiteNode::MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, dou
     }
     last_ndt_confidence_ = res.confidence;
 
+    // Phase2: 退化检测 — 退化场景下 NDT 可能收敛到错误解 (长走廊/平面/开阔地), 跳过本次校正
+    if (res.degenerate) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "[NDT-Good] correction skipped (degenerate): trans_cr=%.1f, rot_cr=%.1f",
+                             res.trans_condition_ratio, res.rot_condition_ratio);
+        return;
+    }
+
     // TP 下限守门 (与 Validate 同口径): 低置信度校正宁可跳过等下个周期,
     // 坏校正比漂移更伤; delta 上限由 smoother 的 max_correction_* 兜底
     if (res.confidence < ndt_->MinConfidence()) {
