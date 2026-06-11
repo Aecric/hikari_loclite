@@ -105,6 +105,19 @@ Tracking quality should use frame counters, not single-frame panic switches.
 The documented defaults are 3 bad frames for Degraded, 10 bad frames for Lost,
 and 5 good frames for recovery to Good.
 
+### Initializing -> Good stability gate
+
+A validated `/initialpose` (or SC candidate) enters `Initializing`, not `Good`
+directly. The gate (`system/stability_gate.hpp`) releases to `Good` only when
+the smoothed output pose stays within `system.stability_gate_trans_thres` /
+`stability_gate_rot_thres_deg` jitter across a `stability_gate_window_sec`
+sliding window, or earlier when NDT TP confidence exceeds
+`system.stability_gate_conf_upper_thres` (TP scale, see NDT Role). During the
+gate window TF/odom keep publishing but `loc_state` stays `Initializing`. Set
+`system.stability_gate_enabled: false` to restore the old "validated ->
+immediately Good" behavior. Reset the gate on every `ResetToMapPose()` path
+(`/initialpose`, manual SC) so a stale window cannot release a fresh pose.
+
 ## Main Processing Rules
 
 - IMU callbacks should enqueue IMU data under mutex.

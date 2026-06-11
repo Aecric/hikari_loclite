@@ -67,6 +67,16 @@ NDT is a validator and low-frequency corrector, not the primary tracking loop.
 - Reject corrections beyond configured translation and rotation bounds.
 - NDT result structs should carry `valid`, confidence, inlier ratio, translation
   delta, and rotation delta.
+- Confidence is pclomp `getTransformationProbability()` (TP): the mean Gaussian
+  density of matched points, not a 0..1 ratio. Real matches typically fall in
+  `[1.5, 5]`; values above ~6 are usually dense-geometry false matches. Calibrate
+  `ndt.min_confidence` and `system.stability_gate_conf_upper_thres` on this TP
+  scale, not on a 0..1 scale.
+- The validation gate is TP + delta only: `valid = converged && TP >=
+  ndt.min_confidence && delta_trans <= ndt.max_delta_trans_m && delta_rot <=
+  ndt.max_delta_rot_deg`. `inlier_ratio` is a reserved field (always 0) — the
+  coverage/inlier metric is intentionally deferred (ADR 2026-06-11). Do not gate
+  on it without re-opening that decision.
 
 ## Scan Context Role
 
