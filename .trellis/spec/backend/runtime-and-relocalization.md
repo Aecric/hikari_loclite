@@ -152,8 +152,18 @@ Use a smoother/gate to prevent unrealistic published pose jumps:
 
 - Reject output jumps beyond configured translation/rotation limits.
 - Apply NDT correction with a configurable gain.
-- Use stricter correction limits than LOST recovery validation.
 
-Defaults from the build document include `max_output_jump_trans_m: 0.5`,
-`max_output_jump_rot_deg: 15.0`, `max_correction_trans_m: 0.3`, and
-`max_correction_rot_deg: 5.0`.
+The `LitePoseSmoother` thresholds are yaml-configurable under the `smoother:`
+section (each key falls back to the struct default if absent):
+`max_output_jump_trans_m: 0.5`, `max_output_jump_rot_deg: 15.0`,
+`max_correction_trans_m: 0.5`, `max_correction_rot_deg: 8.0`.
+
+> **Responsibility boundary (do not re-tighten without re-architecting):**
+> GOOD-state NDT correction only nudges *moderate* drift — `max_correction_*` is
+> the per-cycle clamp on how far a single NDT correction may pull. It was 0.3m/5°,
+> which silently discarded any correction once drift exceeded 0.3m (NDT could
+> never recover). Widened to 0.5m/8° because the now-calibrated TP gate plus the
+> `inlier_ratio` gate already filter bad corrections. **Large drift is not the
+> GOOD-state job** — it must trip degradation detection (residual + NDT TP/divergence)
+> into Degraded/Lost and hand off to SC relocalization, not be chased by a bigger
+> GOOD-state nudge.

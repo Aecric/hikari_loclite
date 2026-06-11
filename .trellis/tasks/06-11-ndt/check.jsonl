@@ -1,4 +1,7 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
 {"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量检查标准"}
 {"file": ".trellis/spec/backend/build-and-dependencies.md", "reason": "构建/依赖校验口径"}
 {"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "运行时契约校验"}
+{"check": "git diff --check", "result": "pass"}
+{"check": "Release docker build (lightning-jazzy:dev, --base-paths src/hikari_loclite, -DCMAKE_BUILD_TYPE=Release)", "result": "pass", "note": "Finished 56.3s; 仅 FLANN CMP0144 dev 警告与 PCL boost.h 弃用提示(既有, 无害)。"}
+{"check": "RelWithDebInfo docker build (throwaway build/install base, 验后删除)", "result": "pass", "note": "Finished 1min19s; 同样仅既有 FLANN/PCL 警告。"}
+{"check": "artifact check (PRD 验收: Release 无 offline/Pangolin)", "result": "pass", "note": "Release lib 目录 = libhikari_loclite_core.so + run_loclite_online (无 run_loclite_offline); ldd 无 Pangolin 链接; RelWithDebInfo 额外含 run_loclite_offline, 印证 CMake build-type guard 生效。"}

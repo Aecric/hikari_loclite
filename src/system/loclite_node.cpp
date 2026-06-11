@@ -56,6 +56,7 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
     double voxel_leaf = 0.2;
     double level_cutoff = 0.5;
     StabilityGate::Options gate_options;
+    LitePoseSmoother::Options smoother_options;  // smoother.* 缺省即 Options 默认 (0.5m/15° 输出, 0.5m/8° 校正)
     try {
         auto yaml = YAML::LoadFile(config_path_);
         if (yaml["common"]) {
@@ -122,6 +123,18 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
         if (yaml["ndt"]) {
             ndt_good_rate_hz_ = yaml["ndt"]["good_rate_hz"].as<double>(1.0);
             ndt_gain_good_ = yaml["ndt"]["gain_good"].as<double>(0.5);
+        }
+        // smoother 跳变门限 (Phase1 可配; 缺省用 Options 默认值, 见 lite_pose_smoother.hpp)
+        if (yaml["smoother"]) {
+            auto sm = yaml["smoother"];
+            smoother_options.max_output_jump_trans_m =
+                sm["max_output_jump_trans_m"].as<double>(smoother_options.max_output_jump_trans_m);
+            smoother_options.max_output_jump_rot_deg =
+                sm["max_output_jump_rot_deg"].as<double>(smoother_options.max_output_jump_rot_deg);
+            smoother_options.max_correction_trans_m =
+                sm["max_correction_trans_m"].as<double>(smoother_options.max_correction_trans_m);
+            smoother_options.max_correction_rot_deg =
+                sm["max_correction_rot_deg"].as<double>(smoother_options.max_correction_rot_deg);
         }
         if (yaml["fixed_map"]) {
             voxel_leaf = yaml["fixed_map"]["voxel_leaf"].as<double>(0.2);
@@ -192,6 +205,13 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
                 "voxel_leaf=%.2fm",
                 init_accum_enabled_ ? 1 : 0, init_accum_min_frames_, init_accum_min_points_,
                 init_accum_window_sec_, init_accum_max_wait_sec_, init_accum_voxel_leaf_);
+
+    // 位姿平滑器: 输出跳变门限 + GOOD 态 NDT 校正门限 (Phase1 可配, 缺省即 Options 默认值)
+    smoother_.Init(smoother_options);
+    RCLCPP_INFO(this->get_logger(),
+                "LitePoseSmoother: max_output_jump=%.2f m/%.1f deg, max_correction=%.2f m/%.1f deg",
+                smoother_options.max_output_jump_trans_m, smoother_options.max_output_jump_rot_deg,
+                smoother_options.max_correction_trans_m, smoother_options.max_correction_rot_deg);
 
     // 重力对齐滤波器 (lidar_frame → level_frame 纯旋转 TF)
     GravityAlignmentFilter::Options gf_options;
@@ -741,8 +761,16 @@ void LocLiteNode::MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, dou
     // 坏校正比漂移更伤; delta 上限由 smoother 的 max_correction_* 兜底
     if (res.confidence < ndt_->MinConfidence()) {
         RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                             "[NDT-Good] correction skipped: TP=%.3f < min_confidence=%.3f",
-                             res.confidence, ndt_->MinConfidence());
+                             "[NDT-Good] correction skipped: TP=%.3f < min_confidence=%.3f (inlier=%.3f)",
+                             res.confidence, ndt_->MinConfidence(), res.inlier_ratio);
+        return;
+    }
+
+    // inlier 覆盖率正交门 (与 Validate 同口径; MinInlierRatio()<=0 时关闭): TP 量纲塌陷时兜底防伪匹配
+    if (ndt_->MinInlierRatio() > 0.0 && res.inlier_ratio < ndt_->MinInlierRatio()) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "[NDT-Good] correction skipped: inlier=%.3f < min_inlier_ratio=%.3f (TP=%.3f)",
+                             res.inlier_ratio, ndt_->MinInlierRatio(), res.confidence);
         return;
     }
 
@@ -757,8 +785,9 @@ void LocLiteNode::MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, dou
     smoother_.Reset();
     state.SetPose(lio_->LidarPoseToImuPose(corrected));
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                         "[NDT-Good] drift corrected: dt=%.3f m, dr=%.2f deg, confidence=%.3f",
-                         delta.translation().norm(), delta.so3().log().norm() * 180.0 / M_PI, res.confidence);
+                         "[NDT-Good] drift corrected: dt=%.3f m, dr=%.2f deg, confidence=%.3f, inlier=%.3f",
+                         delta.translation().norm(), delta.so3().log().norm() * 180.0 / M_PI,
+                         res.confidence, res.inlier_ratio);
 }
 
 void LocLiteNode::PublishPose(const NavState& state) {

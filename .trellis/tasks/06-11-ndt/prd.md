@@ -59,3 +59,46 @@
 - 现有 ndt yaml：threads=1, resolution=1.0, min_confidence=1.0(待重标), max_delta_trans_m=1.0, max_delta_rot_deg=10.0, good_rate_hz=1.0, gain_good=0.5。
 - 构建必须在 lightning-jazzy:dev 容器内 + `--base-paths src/hikari_loclite`（root 有 AMENT_IGNORE）。
 - 禁止链接 lightning.libs / include 其头文件。
+
+## Phase 1 修复 (2026-06-11, bag 实测核查后)
+
+**背景**: zt_5201_map(雷达倾斜 62°) 实跑发现 NDT 在真位姿 TP 仅 ~1.3-1.4 (resolution=1.0, 用户实测),
+而 `min_confidence=1.5` 卡在其上 → init 验证 / GOOD 校正 / SC 验证三条门控全断。根因: 单档 fine
+`resolution=0.5` + 地图 `voxel_leaf=0.2` 偏稀, TP 量纲塌陷 (lightning lidar_loc.cc:501 明确警告
+稀疏图 fine_conf 天然塌陷)。**决策(用户拍板 2026-06-11): 走单档 resolution=1.0, 不上级联。**
+另: smoother `ApplyNdtCorrection` 硬编码 0.3m/5° 封顶 → 漂移超 0.3m 拉不回。
+
+### 改动清单 (Phase 1 only)
+
+1. **config/loclite_livox.yaml**
+   - `ndt.resolution: 0.5 → 1.0`
+   - `ndt.min_confidence: 1.5 → 1.0` (真匹配 ~1.3-1.4 留 ~0.3 余量过, 伪匹配 ~0.15-0.6 拒; 更新 TP 量纲注释为本图实测值)
+   - `system.stability_gate_conf_upper_thres: 3.0 → 1.3` (贴真匹配水平提前放行; 更新注释)
+   - 新增 `smoother:` 段 (4 键, 见下)
+   - 新增 `ndt.min_inlier_ratio` (默认 0.0 = 仅记录不门控, 供现场标定) 与 `ndt.inlier_dist_m` (默认 1.0)
+2. **include/hikari_loclite/system/lite_pose_smoother.hpp**
+   - 加 `struct Options` + `Init(const Options&)` setter, 4 门限改可配; 默认 max_correction 0.3→0.5m / 5→8°
+     (TP 门已正确标定 + inlier 兜底; 中等漂移可拉回, 大漂移交 Phase2/3 状态机+SC, 非 GOOD 微调职责)
+3. **src/system/loclite_node.cpp (+hpp)**: Init 读 `smoother.*` 调 `smoother_.Init()`; 读 `ndt.min_inlier_ratio`/`inlier_dist_m` 传 NdtCorrector
+4. **src/ndt/ndt_corrector.cpp (+hpp)**: SetMap 对 target 建一次 kdtree (pcl KdTreeFLANN);
+   Align 计算 `inlier_ratio` = 降采样源点变换后在 `inlier_dist_m` 内有 target 近邻的占比, 填入 `NdtResult.inlier_ratio`;
+   Validate + MaybeNdtCorrectGood 在 `min_inlier_ratio>0` 时加 inlier 正交门; 日志带 inlier_ratio
+
+新增 smoother yaml 段:
+```yaml
+smoother:
+  max_output_jump_trans_m: 0.5
+  max_output_jump_rot_deg: 15.0
+  max_correction_trans_m: 0.5
+  max_correction_rot_deg: 8.0
+```
+
+### Phase 1 验收
+- 容器内 (lightning-jazzy:dev) Release + RelWithDebInfo 双构建绿; Release 产物无 run_loclite_offline / 无 Pangolin
+- `git diff --check` 过
+- 行为验收 (用户手测, 不在 AI 范围): 干净静止 init 下 GOOD 态 NDT 校正能施加 (TP~1.3 过 1.0 门)、中等漂移被拉回
+
+### Phase 1 不做 (留后续)
+- 退化检测纳入 NDT 信号 (Phase 2, 本任务后续)
+- SC 重力对齐+20帧累积+参数对齐 (Phase 3, 重开 phase5-sc)
+- 静止 init 门控 / 重力 init 加固 (Phase 4, 新任务或并入 mid360)

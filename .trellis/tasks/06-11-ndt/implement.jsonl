@@ -1,6 +1,12 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
 {"file": ".trellis/spec/backend/build-and-dependencies.md", "reason": "容器编译流程与依赖白名单(必须遵守)"}
 {"file": ".trellis/spec/backend/localization-architecture.md", "reason": "定位链路组件边界"}
 {"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "运行时/重定位契约"}
 {"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "RCLCPP 日志规范"}
 {"file": ".trellis/spec/backend/error-handling.md", "reason": "错误处理规范"}
+{"file": "src/ndt/ndt_corrector.cpp", "reason": "NdtCorrector 本体: SetMap 一次性建 target、Align 降采样+TP/delta、Validate 仅 TP+delta 门限(覆盖率延后)。"}
+{"file": "include/hikari_loclite/ndt/ndt_corrector.hpp", "reason": "NdtResult TP 量纲注释、inlier_ratio 预留恒 0、非线程安全说明。"}
+{"file": "include/hikari_loclite/system/stability_gate.hpp", "reason": "轻量 StabilityGate: Initializing→Good 滑窗放行 + 高 TP 提前放行。"}
+{"file": "src/lio/fast_lio_fixed_map.cpp", "reason": "固定地图首帧不变量: 冷启动首帧只初始化 state/时间基准, 不向 fixed_ivox_ 灌当前 scan。"}
+{"file": "src/system/loclite_node.cpp", "reason": "接入 StabilityGate(验证通过→Initializing→门控放行 Good)、NDT good 态低频校正、门控 knobs 解析。"}
+{"file": "include/hikari_loclite/system/loclite_node.hpp", "reason": "持有 StabilityGate 与门控 knobs/状态字段。"}
+{"file": "config/loclite_livox.yaml", "reason": "新增 ndt.source_leaf、min_confidence 按 TP 重标(1.5)、system.stability_gate_* 全套 knobs(带中文注释)。"}

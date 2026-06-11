@@ -7,6 +7,7 @@
 #include <string>
 
 #include <pcl/filters/voxel_grid.h>
+#include <pcl/kdtree/kdtree_flann.h>
 
 #include "common/eigen_types.h"
 #include "common/point_def.h"
@@ -20,7 +21,9 @@ struct NdtResult {
     /// pclomp getTransformationProbability() (TP): "已匹配点的平均 Gaussian 密度".
     /// 量纲参考 lightning (default_livox.yaml:136): 真匹配通常落在 [1.5, 5], >6 多为致密几何伪匹配.
     double confidence = 0.0;
-    double inlier_ratio = 0.0;  // 预留: 覆盖率指标 (用户拍板本版不做, 恒 0)
+    /// 覆盖率指标 (Phase1 起真算): 降采样源点用收敛位姿变换后, 在 ndt.inlier_dist_m 内
+    /// 能找到 target 近邻的占比. 与 TP 互补 (TP 是 Gaussian 密度, 这是几何覆盖率).
+    double inlier_ratio = 0.0;
     double delta_trans_m = 0.0;  // 收敛位姿相对 guess 的平移差 (m)
     double delta_rot_deg = 0.0;  // 收敛位姿相对 guess 的旋转差 (deg)
 };
@@ -52,9 +55,16 @@ class NdtCorrector {
     /// TP 下限 (供调用方在 Good 态校正等场景复用同一口径)
     double MinConfidence() const { return min_confidence_; }
 
+    /// inlier 覆盖率下限 (供调用方在 Good 态校正复用同一口径; <=0 表示该门关闭)
+    double MinInlierRatio() const { return min_inlier_ratio_; }
+
    private:
     /// 按当前参数新建并配置 pclomp 实例 (SetMap 时调用, 保证 target 无残留)
     NdtType::Ptr MakeConfiguredNdt() const;
+
+    /// 计算 inlier 覆盖率: 降采样源点用 pose 变换到 target 系, 逐点查 target kdtree 最近邻,
+    /// 统计最近邻距离 < inlier_dist_m_ 的点占比. target kdtree 在 SetMap 建一次, 这里复用.
+    double ComputeInlierRatio(const CloudPtr& filtered_source, const SE3& pose) const;
 
     int threads_ = 1;
     double resolution_ = 1.0;
@@ -62,8 +72,12 @@ class NdtCorrector {
     double min_confidence_ = 1.5;   // ndt.min_confidence: TP 下限 (标定依据见 yaml 注释)
     double max_delta_trans_m_ = 1.0;
     double max_delta_rot_deg_ = 10.0;
+    double min_inlier_ratio_ = 0.0;  // ndt.min_inlier_ratio: <=0 关闭 inlier 正交门 (仅记录)
+    double inlier_dist_m_ = 1.0;     // ndt.inlier_dist_m: inlier 判定距离 (m)
 
     NdtType::Ptr ndt_;  // 复用实例; 体素协方差只在 SetMap 建一次
+    pcl::KdTreeFLANN<PointType> target_kdtree_;  // SetMap 建一次, 供 ComputeInlierRatio 复用
+    bool target_kdtree_ready_ = false;
     pcl::VoxelGrid<PointType> voxel_source_;
 };
 

@@ -36,6 +36,9 @@ bool NdtCorrector::Init(const std::string& yaml_path) {
             min_confidence_ = ndt["min_confidence"].as<double>(1.5);
             max_delta_trans_m_ = ndt["max_delta_trans_m"].as<double>(1.0);
             max_delta_rot_deg_ = ndt["max_delta_rot_deg"].as<double>(10.0);
+            // inlier 覆盖率正交门 (Phase1): <=0 关闭, 仅记录 inlier_ratio 供标定
+            min_inlier_ratio_ = ndt["min_inlier_ratio"].as<double>(0.0);
+            inlier_dist_m_ = ndt["inlier_dist_m"].as<double>(1.0);
         }
     } catch (...) {
         LOG(ERROR) << "NdtCorrector: failed to load ndt config from " << yaml_path;
@@ -44,7 +47,8 @@ bool NdtCorrector::Init(const std::string& yaml_path) {
     voxel_source_.setLeafSize(source_leaf_, source_leaf_, source_leaf_);
     LOG(INFO) << "NdtCorrector: resolution=" << resolution_ << ", threads=" << threads_
               << ", source_leaf=" << source_leaf_ << ", min_confidence(TP)=" << min_confidence_
-              << ", max_delta=" << max_delta_trans_m_ << "m/" << max_delta_rot_deg_ << "deg";
+              << ", max_delta=" << max_delta_trans_m_ << "m/" << max_delta_rot_deg_ << "deg"
+              << ", min_inlier_ratio=" << min_inlier_ratio_ << ", inlier_dist_m=" << inlier_dist_m_;
     return true;
 }
 
@@ -73,8 +77,39 @@ bool NdtCorrector::SetMap(const CloudPtr& map) {
     ndt_ = MakeConfiguredNdt();
     ndt_->AddTarget(map);
     ndt_->ComputeTargetGrids();
-    LOG(INFO) << "NdtCorrector: map set with " << map->size() << " points, target voxel grids built";
+
+    // inlier 覆盖率用 target kdtree: 与 pclomp 体素格并存, 只在这里建一次, 后续 Align 复用.
+    // 即便 min_inlier_ratio_<=0 (门关闭) 也建, 以便日志记录 inlier_ratio 供现场标定.
+    target_kdtree_.setInputCloud(map);
+    target_kdtree_ready_ = true;
+
+    LOG(INFO) << "NdtCorrector: map set with " << map->size()
+              << " points, target voxel grids + kdtree built";
     return true;
+}
+
+double NdtCorrector::ComputeInlierRatio(const CloudPtr& filtered_source, const SE3& pose) const {
+    if (!target_kdtree_ready_ || !filtered_source || filtered_source->empty()) {
+        return 0.0;
+    }
+    // 源点 (lidar 系) 用收敛位姿变换到 target(map) 系, 逐点查最近邻; 距离 < inlier_dist_m_ 算 inlier
+    const Eigen::Matrix4f T = pose.matrix().cast<float>();
+    const double dist_sq_thres = inlier_dist_m_ * inlier_dist_m_;
+    std::vector<int> idx(1);
+    std::vector<float> dist_sq(1);
+    int inliers = 0;
+    for (const auto& p_src : filtered_source->points) {
+        Eigen::Vector4f ph(p_src.x, p_src.y, p_src.z, 1.0f);
+        Eigen::Vector4f pw = T * ph;
+        PointType query;
+        query.x = pw.x();
+        query.y = pw.y();
+        query.z = pw.z();
+        if (target_kdtree_.nearestKSearch(query, 1, idx, dist_sq) > 0 && dist_sq[0] < dist_sq_thres) {
+            ++inliers;
+        }
+    }
+    return static_cast<double>(inliers) / static_cast<double>(filtered_source->size());
 }
 
 NdtResult NdtCorrector::Align(const CloudPtr& scan, const SE3& guess) {
@@ -110,7 +145,9 @@ NdtResult NdtCorrector::Align(const CloudPtr& scan, const SE3& guess) {
     const SE3 delta = guess.inverse() * result.pose;
     result.delta_trans_m = delta.translation().norm();
     result.delta_rot_deg = delta.so3().log().norm() * 180.0 / M_PI;
-    // Align 的 valid 仅表示"收敛且有输出"; TP/delta 门限在 Validate (或调用方) 判定
+    // inlier 覆盖率: 用收敛位姿 (而非 guess) 把降采样源点投到 target 系统计近邻覆盖率
+    result.inlier_ratio = ComputeInlierRatio(filtered, result.pose);
+    // Align 的 valid 仅表示"收敛且有输出"; TP/delta/inlier 门限在 Validate (或调用方) 判定
     result.valid = true;
     return result;
 }
@@ -122,22 +159,25 @@ NdtResult NdtCorrector::Validate(const SE3& candidate_pose, const CloudPtr& scan
         return result;
     }
 
-    // 门限判定 (用户拍板: 仅 TP + delta, 覆盖率指标留作后续扩展).
-    // 拒绝日志带 TP/delta 数值, 便于现场标定阈值.
+    // 门限判定: TP + delta (主门), 外加 inlier 覆盖率正交门 (Phase1; min_inlier_ratio_<=0 时关闭).
+    // 拒绝日志带 TP/delta/inlier 数值, 便于现场标定阈值.
     const bool conf_ok = result.confidence >= min_confidence_;
     const bool delta_ok =
         result.delta_trans_m <= max_delta_trans_m_ && result.delta_rot_deg <= max_delta_rot_deg_;
-    if (!conf_ok || !delta_ok) {
+    const bool inlier_ok = min_inlier_ratio_ <= 0.0 || result.inlier_ratio >= min_inlier_ratio_;
+    if (!conf_ok || !delta_ok || !inlier_ok) {
         LOG(WARNING) << "NdtCorrector: validate rejected: TP=" << result.confidence
                      << " (min=" << min_confidence_ << "), delta=" << result.delta_trans_m << "m/"
                      << result.delta_rot_deg << "deg (max=" << max_delta_trans_m_ << "m/"
-                     << max_delta_rot_deg_ << "deg)";
+                     << max_delta_rot_deg_ << "deg), inlier=" << result.inlier_ratio
+                     << " (min=" << min_inlier_ratio_ << ")";
         result.valid = false;
         return result;
     }
 
     LOG(INFO) << "NdtCorrector: validate accepted: TP=" << result.confidence
-              << ", delta=" << result.delta_trans_m << "m/" << result.delta_rot_deg << "deg";
+              << ", delta=" << result.delta_trans_m << "m/" << result.delta_rot_deg
+              << "deg, inlier=" << result.inlier_ratio;
     return result;
 }
 

@@ -64,19 +64,45 @@ NDT is a validator and low-frequency corrector, not the primary tracking loop.
 
 - Use NDT to validate `/initialpose` and relocalization candidates.
 - In Good state, NDT correction should be low-rate and gain-limited.
-- Reject corrections beyond configured translation and rotation bounds.
-- NDT result structs should carry `valid`, confidence, inlier ratio, translation
+- Reject corrections beyond configured translation/rotation bounds via the
+  smoother gate (see runtime-and-relocalization "Pose Output Gating").
+- NDT result structs carry `valid`, confidence (TP), `inlier_ratio`, translation
   delta, and rotation delta.
 - Confidence is pclomp `getTransformationProbability()` (TP): the mean Gaussian
-  density of matched points, not a 0..1 ratio. Real matches typically fall in
-  `[1.5, 5]`; values above ~6 are usually dense-geometry false matches. Calibrate
-  `ndt.min_confidence` and `system.stability_gate_conf_upper_thres` on this TP
-  scale, not on a 0..1 scale.
-- The validation gate is TP + delta only: `valid = converged && TP >=
-  ndt.min_confidence && delta_trans <= ndt.max_delta_trans_m && delta_rot <=
-  ndt.max_delta_rot_deg`. `inlier_ratio` is a reserved field (always 0) — the
-  coverage/inlier metric is intentionally deferred (ADR 2026-06-11). Do not gate
-  on it without re-opening that decision.
+  density of matched points, not a 0..1 ratio. **The TP scale is resolution- and
+  map-density-dependent — measure it per map, do not copy a threshold from
+  lightning.** lightning's "real matches fall in [1.5, 5]" describes its
+  *cascaded* multi-scale NDT; a single-stage NDT on a voxel-downsampled fixed map
+  sits lower. Measured on zt_5201_map (`fixed_map.voxel_leaf=0.2`) at
+  `ndt.resolution=1.0`, true-pose TP ≈ 1.3–1.4, hence `ndt.min_confidence=1.0`
+  and `system.stability_gate_conf_upper_thres=1.3`. Re-measure and re-tune for a
+  new map/sensor; a too-high threshold silently breaks init validation, GOOD-state
+  correction, and SC validation all at once.
+- The validation gate is TP + delta, plus an optional orthogonal `inlier_ratio`
+  coverage gate: `valid = converged && TP >= ndt.min_confidence && delta_trans <=
+  ndt.max_delta_trans_m && delta_rot <= ndt.max_delta_rot_deg && (ndt.min_inlier_ratio
+  <= 0 || inlier_ratio >= ndt.min_inlier_ratio)`. `inlier_ratio` is the fraction of
+  downsampled source points that, transformed by the **converged** pose (not the
+  guess), find a target neighbor within `ndt.inlier_dist_m` (target kd-tree built
+  once in `SetMap`). It complements TP (TP = Gaussian density of matched points;
+  inlier = geometric coverage). Default `ndt.min_inlier_ratio=0.0` keeps the gate
+  off (record-only) for field calibration; raise it once a map's true/false inlier
+  separation is known.
+
+### Design Decision: single-stage NDT at resolution 1.0 (not 0.5, not cascaded)
+
+**Context**: With `ndt.resolution=0.5` on a `voxel_leaf=0.2` fixed map, measured
+TP collapsed to 0.15–1.2 even at the true pose — below the (mis-copied)
+`min_confidence=1.5` — so `/initialpose` validation, GOOD-state correction, and
+SC validation all silently failed. lightning warns (lidar_loc.cc:501) that fine
+NDT confidence collapses on sparse maps.
+
+**Decision (user 2026-06-11)**: single-stage `ndt.resolution=1.0` (raises and
+stabilizes TP into a usable ~1.3–1.4 band), recalibrate thresholds to the
+measured scale, and add `inlier_ratio` as a cheap orthogonal gate. Do NOT adopt
+lightning's cascaded 5→2→0.5 multi-scale NDT — embedded budget is `threads=1`
+and cascade triples NDT cost. Escalate to cascade only if a future map proves
+single-stage TP cannot separate true from false matches.
 
 ## Scan Context Role
 

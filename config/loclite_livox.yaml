@@ -29,10 +29,12 @@ system:
   stability_gate_rot_thres_deg: 4.0     # 滑窗内最大旋转抖动 (deg)
   stability_gate_window_sec: 3.0        # 滑动窗口长度 (s)
   # conf_upper_thres: NDT TP >= 此值视为强可信验证, 不等窗口直接提前放行 Good; <=0 关闭提前放行.
-  # TP 量纲同 ndt.min_confidence (真匹配通常落在 [1.5, 5], 见 lightning default_livox.yaml:136 注释).
-  # 取 3.0 = 真匹配区间中上水平; 注意与 lightning 的 stability_gate_conf_upper_thres(=10, 高分伪匹配守门)
-  # 语义不同, 不要照抄 10 —— >6 已是伪匹配高发区 (lightning init_conf_upper_clamp=6.0), 提前放行反而危险.
-  stability_gate_conf_upper_thres: 3.0
+  # TP 量纲同 ndt.min_confidence. Phase1 实测 (zt_5201_map, 雷达倾斜 62°, resolution=1.0):
+  # 真位姿 TP 仅 ~1.3-1.4 (单档 + voxel_leaf=0.2 偏稀, TP 量纲塌陷), 远低于 lightning [1.5,5] 经验区间.
+  # 取 1.3 = 贴本图真匹配水平: 一旦 NDT 验证 TP 达 1.3 即视为可信, 提前放行 Good, 不再死等滑窗.
+  # 注意与 lightning 的 stability_gate_conf_upper_thres(=10, 高分伪匹配守门) 语义不同, 且本图 TP 量纲已塌陷,
+  # 千万不要照抄 lightning 的数值 —— 应按现场 Validate 日志里的真匹配 TP 重标.
+  stability_gate_conf_upper_thres: 1.3
 
 reloc:
   init_max_retries: 5                   # /initialpose sticky retry 最大重试次数, 超过后放弃回 WAIT_FOR_INITIALPOSE
@@ -102,16 +104,30 @@ roi:
 ndt:
   enabled: true
   threads: 1                            # pclomp OMP 线程数; 嵌入式保持 1, 避免与 LIO 主链路抢核 (lightning P1 setNumThreads(1) 同款考量)
-  resolution: 0.5                      # target 体素分辨率 (m); Mid360 室内 1.0m 足够 (lightning local_ndt 同款)
+  resolution: 1.0                      # target 体素分辨率 (m); Mid360 室内 1.0m 足够 (lightning local_ndt 同款). Phase1: 单档不级联, 0.5 偏细令 TP 量纲塌陷, 回到 1.0
   source_leaf: 0.3                      # 源点云 (去畸变 scan) 降采样 leaf (m), 控制单次 Align 的 CPU 预算
   # min_confidence: NDT 置信度下限, 量纲为 pclomp getTransformationProbability() (TP),
   # 即"已匹配点的平均 Gaussian 密度" (配准得分 / 源点数), 与点云密度/场景结构相关.
-  # 标定依据 (lightning): tracking_conf_thres_=1.5 (lidar_loc.h, TP<1.5 视为低质量),
-  # multi_scale_bad_conf_thres=1.5 (default_livox.yaml:219); 真匹配 TP 通常落在 [1.5, 5],
-  # >6 多为致密几何伪匹配 (init_conf_upper_clamp=6.0). 故取 1.5 = "至少是正常质量的真匹配".
-  # 现场标定方法: 看 Validate 拒绝日志里的 TP 数值; 正确位姿若持续被拒可适当下调 (不建议 <1.0).
-  min_confidence: 1.5
+  # Phase1 实测 (zt_5201_map, 雷达倾斜 62°, resolution=1.0, 地图 voxel_leaf=0.2):
+  # 真位姿 TP 仅 ~1.3-1.4 (单档 + 稀疏图, TP 量纲塌陷, 见 lightning lidar_loc.cc:501 稀疏图 fine_conf 塌陷警告),
+  # 远低于 lightning [1.5,5] 经验区间. 用 1.5 会把真匹配也卡掉 (init验证/GOOD校正/SC验证三门全断).
+  # 故 Phase1 取 1.0 = 真匹配 ~1.3-1.4 留 ~0.3 余量过, 伪匹配 ~0.15-0.6 仍拒. 不要再照搬 lightning 的 [1.5,5].
+  # 现场标定方法: 看 Validate 日志里真位姿的 TP, 在其下方留 ~0.3 余量取值 (不建议 <0.8).
+  min_confidence: 1.0
+  # inlier 覆盖率正交门 (Phase1 新增): 降采样源点用收敛位姿变换后, 在 inlier_dist_m 内能找到 target 近邻的占比.
+  # 与 TP 互补 (TP 是 Gaussian 密度, inlier 是几何覆盖率), 防 TP 量纲塌陷时单门误收伪匹配.
+  min_inlier_ratio: 0.0                 # 0 = 仅记录不门控 (Phase1 默认, 先看日志标定); >0 才作为正交门拒绝
+  inlier_dist_m: 1.0                    # inlier 判定距离: 变换后源点到 target 最近邻 < 此值算 inlier (m)
   max_delta_trans_m: 1.0                # Validate: 收敛位姿相对候选 guess 的平移上限 (m)
   max_delta_rot_deg: 10.0               # Validate: 收敛位姿相对候选 guess 的旋转上限 (deg)
   good_rate_hz: 1.0                     # GOOD 态低频 NDT 漂移校正频率 (Hz, 按时间间隔判断而非帧数)
   gain_good: 0.5                        # GOOD 态 NDT 校正增益 (0~1, 增益混合后 ResetToMapPose)
+
+smoother:
+  # LitePoseSmoother 跳变门限 (Phase1 改为可配; 缺省即下列新值).
+  # max_correction 从 0.3m/5° 放宽到 0.5m/8°: TP 门已正确标定 (1.0) + inlier 兜底, 中等漂移可拉回;
+  # 大漂移 (>0.5m) 不是 GOOD 态微调的职责, 交后续 Phase 的状态机降级 + SC 重定位.
+  max_output_jump_trans_m: 0.5          # Fast-LIO 输出位姿单帧平移跳变上限 (m), 超过保留上一帧
+  max_output_jump_rot_deg: 15.0         # Fast-LIO 输出位姿单帧旋转跳变上限 (deg)
+  max_correction_trans_m: 0.5           # GOOD 态 NDT 校正相对 fast_pose 的平移上限 (m), 超过整帧拒绝校正
+  max_correction_rot_deg: 8.0           # GOOD 态 NDT 校正相对 fast_pose 的旋转上限 (deg)
