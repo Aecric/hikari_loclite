@@ -38,3 +38,36 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: Phase5 SC relocalization implementation
+
+**Date**: 2026-06-11
+**Task**: Phase5 SC relocalization implementation
+**Branch**: `master`
+
+### Summary
+
+Implemented RelocManager module and wired Scan Context into hikari_loclite for bounded init/LOST relocalization. SC database + poses.txt loading, NDT validation gate, /initialpose blackout, manual sc_reloc service, debug topics. Quality check found and fixed 8 issues (hardcoded cooldown, unenforced max_runtime, missing disable_after_good check, stale TODOs, missing pose output in LOST, marker positions).
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `35b6dd8` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

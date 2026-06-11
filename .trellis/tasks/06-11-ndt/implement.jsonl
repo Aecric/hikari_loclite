@@ -1,0 +1,6 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/build-and-dependencies.md", "reason": "容器编译流程与依赖白名单(必须遵守)"}
+{"file": ".trellis/spec/backend/localization-architecture.md", "reason": "定位链路组件边界"}
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "运行时/重定位契约"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "RCLCPP 日志规范"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误处理规范"}
