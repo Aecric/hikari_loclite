@@ -71,3 +71,37 @@ Implemented RelocManager module and wired Scan Context into hikari_loclite for b
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: NDT Phase 2 退化检测实现
+
+**Date**: 2026-06-11
+**Task**: NDT Phase 2 退化检测实现
+**Branch**: `master`
+
+### Summary
+
+实现 NDT 退化检测: 新建 degeneracy_check.hpp (Hessian 特征值分析), 扩展 NdtResult/NdtCorrector (Align 后退化判定, Validate 退化拒绝), loclite_node MaybeNdtCorrectGood 退化跳过, 3 个 yaml knobs. Docker Release 构建通过.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5358cb0` | (see git log) |
+| `4ce6aea` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 2
+- **Total Sessions**: 3
 - **Last Active**: 2026-06-11
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~73 | Active |
+| `journal-1.md` | ~107 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 3 | 2026-06-11 | NDT Phase 2 退化检测实现 | `5358cb0`, `4ce6aea` | `master` |
 | 2 | 2026-06-11 | Phase5 SC relocalization implementation | `35b6dd8` | `master` |
 | 1 | 2026-06-11 | 对外接口同步至契约第21节 (lightning 可替换) | `7808274` | `master` |
 <!-- @@@/auto:session-history -->
