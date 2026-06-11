@@ -1,0 +1,8 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python3 .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/localization-architecture.md", "reason": "SC role, NDT validation gate, fixed-map invariant"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Reloc module placement and package boundary rules"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "RelocCandidate invalid outcomes and no-reset-before-validation rules"}
+{"file": "hikari_loclite_build_2026-06-10.md", "reason": "Primary Phase 5 contract and Lightning-compatible SC interface requirements"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer candidate-to-reset flow and SC arming checks"}
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "Node orchestration, state transitions, initialpose and LOST relocalization rules"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "Reuse existing SC/NDT/config patterns instead of duplicate stacks"}
