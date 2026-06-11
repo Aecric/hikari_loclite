@@ -26,6 +26,7 @@
 #include "lio/fast_lio_fixed_map.hpp"
 #include "lio/gravity_alignment.h"
 #include "ndt/ndt_corrector.hpp"
+#include "reloc/reloc_manager.hpp"
 #include "system/lite_pose_smoother.hpp"
 #include "system/loclite_state_machine.hpp"
 #include "system/stability_gate.hpp"
@@ -70,6 +71,10 @@ class LocLiteNode : public rclcpp::Node {
     CloudPtr BuildInitAccumulatedCloud() const;
     /// Good 态低频 NDT 漂移校正 (按时间间隔节流, 设计文档第 14 节)
     void MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, double ts);
+    /// SC 重定位尝试 (LOST 态 or cold start), 持锁调用
+    void TryScRelocalize(const CloudPtr& scan, double ts, bool manual = false);
+    /// 发布 SC 调试话题 (仅在有订阅者时发布)
+    void PublishScDebugTopics();
 
     /// odom + TF(map→base_link) + path
     void PublishPose(const NavState& state);
@@ -121,17 +126,19 @@ class LocLiteNode : public rclcpp::Node {
     int init_accum_points_ = 0;
     double init_accum_first_ts_ = -1.0;
     double init_accum_window_start_ts_ = -1.0;
-    double blackout_deadline_sec_ = 0.0;  // TODO(P5): SC 接入后用于阻断 blackout 窗口内的 SC 抢注
+    double blackout_deadline_sec_ = 0.0;  // SC 自动注入阻断窗口截止时刻 (initialpose blackout)
     double lost_enter_ts_ = -1.0;         // Lost 进入时刻 (传感器时间), 供 lost_timeout_sec 计时
     double last_ndt_correct_ts_ = -1.0;   // Good 态 NDT 校正节流时刻
     double last_ndt_confidence_ = 0.0;    // 最近一次 NdtResult.confidence, 供 marker 显示
     double last_path_pub_ts_ = -1.0;
     double last_level_tf_ts_ = -1.0;      // 上次 level TF 的状态时间戳, 防止 IMU 速率下重复广播同一 stamp
+    double last_sc_attempt_ts_ = -1.0;    // SC 重定位尝试节流 (cooldown)
     SE3 marker_pose_;                     // loc_status marker 的悬浮位置 (最近一次有意义的位姿)
 
     // --- 组件 ---
     FastLioFixedMap::Ptr lio_;
     NdtCorrector::Ptr ndt_;
+    RelocManager::Ptr reloc_;
     LitePoseSmoother smoother_;
     LocLiteStateMachine state_machine_;
     StabilityGate stability_gate_;  // Initializing → Good 放行门控 (持锁访问)

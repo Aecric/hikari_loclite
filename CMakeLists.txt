@@ -54,6 +54,7 @@ add_library(${PROJECT_NAME}_core SHARED
   src/ndt/ndt_omp.cpp
   src/ndt/voxel_grid_covariance_omp.cpp
   src/ndt/ndt_corrector.cpp
+  src/reloc/reloc_manager.cpp
   src/system/loclite_node.cpp
 )
 
