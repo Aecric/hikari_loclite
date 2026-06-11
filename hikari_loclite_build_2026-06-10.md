@@ -961,24 +961,18 @@ class LitePoseSmoother {
 
 ## 17. 构建命令
 
-从工作空间根目录：
+项目应该从docker构建 docker镜像为 lightning-jazzy:dev ：
 
 ```bash
-cd /home/aecriclin/3d_slam_ws
-colcon build --packages-select hikari_loclite --cmake-args -DCMAKE_BUILD_TYPE=Release
+cd /root/slam_ws
+colcon build --packages-select hikari_loclite --cmake-args -DCMAKE_BUILD_TYPE=Release --base-path src/
 ```
 
 运行：
 
 ```bash
-source /home/aecriclin/3d_slam_ws/install/setup.bash
+source ./install/setup.bash
 ros2 run hikari_loclite run_loclite_online --config <yaml> --map_path <map_path>
-```
-
-如果使用 CPU 亲和性 / 实时调度：
-
-```bash
-sudo setcap cap_sys_nice+ep /home/aecriclin/3d_slam_ws/install/hikari_loclite/lib/hikari_loclite/run_loclite_online
 ```
 
 ## 18. 分阶段实施建议
