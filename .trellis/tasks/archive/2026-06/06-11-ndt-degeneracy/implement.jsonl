@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/build-and-dependencies.md", "reason": "容器编译流程与依赖白名单"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "RCLCPP 日志规范"}
+{"file": "include/hikari_loclite/ndt/ndt_corrector.hpp", "reason": "NdtResult 结构体 (新增 degenerate/trans_condition_ratio/rot_condition_ratio)、新增 degeneracy_* 配置字段"}
+{"file": "src/ndt/ndt_corrector.cpp", "reason": "NdtCorrector 本体: Align 后提取 Hessian → DegeneracyEigenCheck, Validate 退化拒绝"}
+{"file": "src/system/loclite_node.cpp", "reason": "MaybeNdtCorrectGood 退化跳过逻辑"}
+{"file": "/home/aecriclin/3d_slam_ws/src/lightning-lm/src/core/localization/lidar_loc/gating_features.h", "reason": "退化检测参考实现: DegeneracyEigenCheck (97-159行)"}
+{"file": "config/loclite_livox.yaml", "reason": "新增 ndt.degeneracy_* knobs"}

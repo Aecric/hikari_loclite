@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "质量检查标准"}
+{"file": ".trellis/spec/backend/build-and-dependencies.md", "reason": "构建/依赖校验口径"}
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "运行时契约校验"}
