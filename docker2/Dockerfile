@@ -59,16 +59,24 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then LIVOX_ARCH="arm64"; else LIVOX_ARCH="am
             RELEASE_API="https://api.github.com/repos/${LIVOX_DEB_REPO}/releases/tags/${LIVOX_DEB_TAG}"; \
         fi && \
         echo "Resolving livox deb from ${RELEASE_API}" && \
-        curl -fSL "${RELEASE_API}" -o /tmp/livox-release.json && \
-        LIVOX_DEB_URL="$(python3 -c 'import json,re,sys; ros,codename,arch,path=sys.argv[1:]; release=json.load(open(path,encoding="utf-8")); assets=release.get("assets") or []; strict=re.compile(r"^ros-%s-livox-ros-driver2_.*-0%s_%s\.deb$"%(re.escape(ros),re.escape(codename),re.escape(arch))); fallback=re.compile(r"^ros-%s-livox-ros-driver2_.*_%s\.deb$"%(re.escape(ros),re.escape(arch))); matches=[a for a in assets if strict.match(a.get("name",""))] or [a for a in assets if fallback.match(a.get("name",""))]; print(matches[0]["browser_download_url"]) if matches else (_ for _ in ()).throw(SystemExit("no livox deb asset for ros=%s, codename=%s, arch=%s; assets: %s"%(ros,codename,arch,", ".join(a.get("name","") for a in assets) or "<none>")))' "${ROS_DISTRO}" "${UBUNTU_CODENAME}" "${LIVOX_ARCH}" /tmp/livox-release.json)" && \
+        curl --retry 5 --retry-delay 2 --retry-all-errors -fSL "${RELEASE_API}" -o /tmp/livox-release.json && \
+        python3 docker2/resolve_livox_deb.py \
+            --release-json /tmp/livox-release.json \
+            --ros-distro "${ROS_DISTRO}" \
+            --ubuntu-codename "${UBUNTU_CODENAME}" \
+            --arch "${LIVOX_ARCH}" \
+            --output /tmp/livox-url.tsv && \
+        LIVOX_DEB_NAME="$(cut -f1 /tmp/livox-url.tsv)" && \
+        LIVOX_DEB_URL="$(cut -f2 /tmp/livox-url.tsv)" && \
+        echo "Matched livox deb asset: ${LIVOX_DEB_NAME}" && \
         rm /tmp/livox-release.json; \
     else \
         LIVOX_DEB_URL="https://github.com/${LIVOX_DEB_REPO}/releases/download/${LIVOX_DEB_TAG}/ros-${ROS_DISTRO}-livox-ros-driver2_${LIVOX_DEB_VERSION}_${LIVOX_ARCH}.deb"; \
     fi && \
     echo "Fetching livox deb: ${LIVOX_DEB_URL}" && \
-    curl -fSL "${LIVOX_DEB_URL}" -o /tmp/livox.deb && \
+    curl --retry 5 --retry-delay 2 --retry-all-errors -fSL "${LIVOX_DEB_URL}" -o /tmp/livox.deb && \
     dpkg -i /tmp/livox.deb && \
-    rm /tmp/livox.deb
+    rm -f /tmp/livox.deb /tmp/livox-url.tsv
 
 RUN rosdep init 2>/dev/null || true && \
     for i in 1 2 3; do \

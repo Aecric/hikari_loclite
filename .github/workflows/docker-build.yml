@@ -83,6 +83,7 @@ jobs:
             runner: ubuntu-24.04-arm
             need_qemu: false
             build_jobs: ${{ inputs.build_jobs || '4' }}
+            livox_deb_repo: Aecric/livox_ros_driver2
             livox_deb_tag: '1.2.6.1'
             livox_deb_version: auto
             experimental: false
@@ -93,6 +94,7 @@ jobs:
             runner: ubuntu-24.04
             need_qemu: false
             build_jobs: '6'
+            livox_deb_repo: Aecric/livox_ros_driver2
             livox_deb_tag: '1.2.6.1'
             livox_deb_version: auto
             experimental: false
@@ -198,7 +200,7 @@ jobs:
           echo "Runner: ${{ matrix.runner }}"
           echo "Arch: $(uname -m), target ${{ matrix.arch }} (${{ matrix.platform }})"
           echo "Distro: ${{ matrix.distro }} / ${{ matrix.codename }}"
-          echo "Livox: tag=${{ matrix.livox_deb_tag }} version=${{ matrix.livox_deb_version }}"
+          echo "Livox: repo=${{ matrix.livox_deb_repo }} tag=${{ matrix.livox_deb_tag }} version=${{ matrix.livox_deb_version }}"
           echo "Experimental: ${{ matrix.experimental }}"
           echo "BUILD_JOBS: ${{ matrix.build_jobs }}"
           free -h
@@ -215,6 +217,7 @@ jobs:
             ROS_DISTRO=${{ matrix.distro }}
             UBUNTU_CODENAME=${{ matrix.codename }}
             BUILD_JOBS=${{ matrix.build_jobs }}
+            LIVOX_DEB_REPO=${{ matrix.livox_deb_repo }}
             LIVOX_DEB_TAG=${{ matrix.livox_deb_tag }}
             LIVOX_DEB_VERSION=${{ matrix.livox_deb_version }}
           cache-from: type=gha,scope=hikari-loclite-${{ matrix.distro }}-${{ matrix.codename }}-${{ matrix.arch }}

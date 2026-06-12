@@ -16,6 +16,7 @@ set -euo pipefail
 
 ROS_DISTRO="${ROS_DISTRO:-humble}"
 UBUNTU_CODENAME="${UBUNTU_CODENAME:-jammy}"
+LIVOX_DEB_REPO="${LIVOX_DEB_REPO:-Aecric/livox_ros_driver2}"
 LIVOX_DEB_TAG="${LIVOX_DEB_TAG:-1.2.6.1}"
 LIVOX_DEB_VERSION="${LIVOX_DEB_VERSION:-auto}"
 
@@ -89,7 +90,7 @@ echo "==> [4/5] Build package"
 mkdir -p "${OUTPUT_DIR}"
 BUILD_START="$(date +%s)"
 echo "    target:        ros-${ROS_DISTRO} on ubuntu-${UBUNTU_CODENAME} (${TARGETARCH})"
-echo "    livox deb:     tag=${LIVOX_DEB_TAG} version=${LIVOX_DEB_VERSION}"
+echo "    livox deb:     repo=${LIVOX_DEB_REPO} tag=${LIVOX_DEB_TAG} version=${LIVOX_DEB_VERSION}"
 echo "    output:        ${OUTPUT_DIR}"
 
 docker buildx build \
@@ -99,6 +100,7 @@ docker buildx build \
     --build-arg ROS_DISTRO="${ROS_DISTRO}" \
     --build-arg UBUNTU_CODENAME="${UBUNTU_CODENAME}" \
     --build-arg BUILD_JOBS="${BUILD_JOBS}" \
+    --build-arg LIVOX_DEB_REPO="${LIVOX_DEB_REPO}" \
     --build-arg LIVOX_DEB_TAG="${LIVOX_DEB_TAG}" \
     --build-arg LIVOX_DEB_VERSION="${LIVOX_DEB_VERSION}" \
     --output "type=local,dest=${OUTPUT_DIR}" \

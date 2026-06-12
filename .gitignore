@@ -4,3 +4,5 @@ log/
 install/
 *.log
 *.tmp
+__pycache__/
+*.pyc
