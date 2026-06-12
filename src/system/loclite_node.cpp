@@ -300,8 +300,10 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
                 return;
             }
 
-            // NDT validation
-            const NdtResult ndt_res = ndt_->Validate(candidate.pose, scan);
+            // NDT validation: SC 候选用 reloc.sc_max_delta_* 专用 delta 门限 (C1, 同自动路径)
+            const NdtResult ndt_res = ndt_->Validate(candidate.pose, scan,
+                                                     reloc_->ScMaxDeltaTransM(),
+                                                     reloc_->ScMaxDeltaRotDeg());
             if (!ndt_res.valid) {
                 RCLCPP_WARN(this->get_logger(),
                             "[SC-Reloc] manual SC candidate kf_id=%d rejected by NDT "
@@ -323,6 +325,8 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
             has_pending_init_pose_ = false;
             init_retry_count_ = 0;
             ResetInitAccumulation();
+            // ResetToMapPose 后 LIO 位姿域断裂, 稳定门控分支下 reloc 仍 armed, 必须清空 SC 累积缓冲
+            reloc_->ClearAccumulation();
 
             if (stability_gate_enabled_) {
                 stability_gate_.Reset();
@@ -469,6 +473,13 @@ void LocLiteNode::ProcessFrame() {
 
     const auto loc_state = state_machine_.State();
 
+    // SC 查询点云滚动累积: armed (init/LOST) 期间逐帧入队 (降采样副本 + LIO 位姿).
+    // 必须在 SC cooldown 门之前逐帧执行, 否则缓冲 5s 才进 1 帧永远凑不齐;
+    // 合并/重力对齐/查询仍只在 TryScRelocalize 的 cooldown 节奏内发生.
+    if (reloc_->Armed() && reloc_->ScEnabled()) {
+        reloc_->AccumulateScan(scan, lio_->LatestPose());
+    }
+
     if (loc_state == LiteLocState::Good || loc_state == LiteLocState::Degraded) {
         const SE3 raw_lidar_pose = lio_->ImuPoseToLidarPose(state.GetPose());
         const SE3 smoothed_lidar_pose = smoother_.UpdateFastLioPose(raw_lidar_pose);
@@ -594,6 +605,9 @@ void LocLiteNode::HandlePendingInitPose(const CloudPtr& scan, double ts) {
         has_pending_init_pose_ = false;
         init_retry_count_ = 0;
         ResetInitAccumulation();
+        // ResetToMapPose 后 LIO 位姿域断裂, 防御性清空 SC 累积缓冲
+        // (当前 /initialpose 回调已 disarm → 缓冲为空, 此处保证不变量不依赖 disarm 策略)
+        reloc_->ClearAccumulation();
         lost_enter_ts_ = -1.0;
         last_ndt_correct_ts_ = ts;  // 刚做过 NDT, Good 态漂移校正从现在起计时
         marker_pose_ = res.pose;
@@ -943,7 +957,6 @@ void LocLiteNode::TryScRelocalize(const CloudPtr& scan, double ts, bool manual) 
     if (!manual && last_sc_attempt_ts_ >= 0.0 && ts - last_sc_attempt_ts_ < cooldown) {
         return;
     }
-    last_sc_attempt_ts_ = ts;
 
     // Blackout check: block automatic SC during /initialpose blackout window
     // 时钟域: deadline 由 /initialpose 回调用墙钟设定, 比较必须同为墙钟.
@@ -955,6 +968,19 @@ void LocLiteNode::TryScRelocalize(const CloudPtr& scan, double ts, bool manual) 
                              wall_now, blackout_deadline_sec_);
         return;
     }
+
+    // 帧数不足的 skip 不消耗 cooldown (C2): last_sc_attempt_ts_ 只在真正执行 QueryTopK 时写入.
+    // 否则 Arm 后首次尝试 (frames=1/N) 即烧掉一个 cooldown 周期, 缓冲攒满 (~2s) 后还要再等
+    // 5s, LOST 窗口 (lost_timeout_sec=5s) 内抢不到一次真查询. 此处提前判帧数, 不足直接 return,
+    // 缓冲由逐帧 AccumulateScan 继续填充, 攒满即查. (manual 走 RunScanContextOnce 单帧回退)
+    if (!manual && reloc_->ScAccumFrames() > 1 &&
+        reloc_->AccumulatedFrames() < reloc_->ScAccumFrames()) {
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "[SC-Reloc] accumulating frames=%d/%d, skip without consuming cooldown",
+                             reloc_->AccumulatedFrames(), reloc_->ScAccumFrames());
+        return;
+    }
+    last_sc_attempt_ts_ = ts;
 
     const SE3 current_imu_pose = lio_->LatestState().GetPose();
     RelocCandidate candidate;
@@ -970,8 +996,10 @@ void LocLiteNode::TryScRelocalize(const CloudPtr& scan, double ts, bool manual) 
         return;
     }
 
-    // NDT validation
-    const NdtResult ndt_res = ndt_->Validate(candidate.pose, scan);
+    // NDT validation: SC 候选用 reloc.sc_max_delta_* 专用 delta 门限 (C1) —
+    // SC sector 分辨率 6° 量化 + 关键帧间距使正确候选 delta 常超 ndt.* 门限 (/initialpose 量纲)
+    const NdtResult ndt_res =
+        ndt_->Validate(candidate.pose, scan, reloc_->ScMaxDeltaTransM(), reloc_->ScMaxDeltaRotDeg());
     if (!ndt_res.valid) {
         RCLCPP_WARN(this->get_logger(),
                     "[SC-Reloc] SC candidate kf_id=%d rejected by NDT "
@@ -990,6 +1018,8 @@ void LocLiteNode::TryScRelocalize(const CloudPtr& scan, double ts, bool manual) 
     has_pending_init_pose_ = false;
     init_retry_count_ = 0;
     ResetInitAccumulation();
+    // ResetToMapPose 后 LIO 位姿域断裂, 稳定门控分支下 reloc 仍 armed, 必须清空 SC 累积缓冲
+    reloc_->ClearAccumulation();
 
     if (stability_gate_enabled_) {
         stability_gate_.Reset();
@@ -1014,6 +1044,18 @@ void LocLiteNode::TryScRelocalize(const CloudPtr& scan, double ts, bool manual) 
 
 void LocLiteNode::PublishScDebugTopics() {
     const auto& debug = reloc_->LastDebugInfo();
+
+    // SC accumulated query cloud (level 系: 合并到最新帧 body 系后重力对齐, 即 QueryTopK 实际输入)
+    if (sc_accum_cloud_pub_->get_subscription_count() > 0) {
+        const CloudPtr query_cloud = reloc_->LastQueryCloud();
+        if (query_cloud && !query_cloud->empty()) {
+            sensor_msgs::msg::PointCloud2 msg;
+            pcl::toROSMsg(*query_cloud, msg);
+            msg.header.stamp = this->now();
+            msg.header.frame_id = level_frame_id_;
+            sc_accum_cloud_pub_->publish(msg);
+        }
+    }
 
     // SC init_guess (winning candidate pose)
     if (sc_init_guess_pub_->get_subscription_count() > 0 && debug.best.valid) {

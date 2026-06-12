@@ -55,7 +55,11 @@ class NdtCorrector {
 
     /// 候选位姿验证: Align(scan, candidate) 后做门限判定,
     /// valid = 收敛 且 TP >= ndt.min_confidence 且 delta <= max_delta_trans_m / max_delta_rot_deg.
-    NdtResult Validate(const SE3& candidate_pose, const CloudPtr& scan);
+    /// @param max_delta_trans_m / max_delta_rot_deg  可选 delta 门限覆盖, <=0 时退回 ndt.max_delta_*
+    ///        成员门限. SC 候选验证传 reloc.sc_max_delta_* (SC sector 分辨率 6° 量化 + 关键帧间距,
+    ///        ndt.* 门限按 /initialpose 量纲设定, 对 SC 候选过紧); /initialpose 验证保持缺省.
+    NdtResult Validate(const SE3& candidate_pose, const CloudPtr& scan,
+                       double max_delta_trans_m = -1.0, double max_delta_rot_deg = -1.0);
 
     /// TP 下限 (供调用方在 Good 态校正等场景复用同一口径)
     double MinConfidence() const { return min_confidence_; }

@@ -146,6 +146,37 @@ immediately Good" behavior. Reset the gate on every `ResetToMapPose()` path
 - In Good state, disarm relocalization so SC threads or workers do not consume
   CPU.
 
+### Convention: one clock domain per comparison (gotcha, bag-verified)
+
+`LocLiteNode` carries two time domains: **scan/measurement time** `ts` (bag
+time during replay — can be weeks behind) and **wall clock**
+`this->now().seconds()`. Any comparison must keep both sides in one domain:
+
+- `/initialpose` blackout: deadline set from wall clock, compared against wall
+  clock (`loclite_node.cpp` `TryScRelocalize`). The original code compared the
+  wall-clock deadline against `ts`; during bag replay `ts` is always smaller,
+  so after one `/initialpose` automatic SC was **permanently** blacked out —
+  invisible on the real robot (scan ts ≈ wall), fatal for every bag-based SC
+  test. Fixed in commit 3a6e9b8.
+- SC cooldown: `ts` vs `last_sc_attempt_ts_` (both scan time) — consistent.
+- SC runtime limit / Arm timestamps: wall vs wall — consistent.
+
+When adding any new timer/deadline, state the domain in the member's comment
+(see `blackout_deadline_sec_`) and log both sides on the skip path.
+
+### SC attempt cadence (LOST window budget)
+
+The LOST window is only `system.lost_timeout_sec` (5 s) long before the node
+disarms SC and drops to `WAIT_FOR_INITIALPOSE`. Budget inside it:
+Arm clears the accumulation buffer → buffer refills at frame rate
+(~2 s for 20 frames) → first real query must fire immediately after.
+Therefore the **insufficient-frames skip must not consume the SC cooldown**:
+`last_sc_attempt_ts_` is written only when `QueryTopK` actually runs
+(order in `TryScRelocalize`: cooldown check → blackout check → frames check
+(no cooldown write) → record attempt ts → real query). The original ordering
+burned the only in-window attempt on a `frames=1/20` skip and SC never queried
+before WAIT.
+
 ## Pose Output Gating
 
 Use a smoother/gate to prevent unrealistic published pose jumps:

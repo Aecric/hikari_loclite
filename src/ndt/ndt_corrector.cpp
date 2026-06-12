@@ -175,7 +175,12 @@ NdtResult NdtCorrector::Align(const CloudPtr& scan, const SE3& guess) {
     return result;
 }
 
-NdtResult NdtCorrector::Validate(const SE3& candidate_pose, const CloudPtr& scan) {
+NdtResult NdtCorrector::Validate(const SE3& candidate_pose, const CloudPtr& scan,
+                                 double max_delta_trans_m, double max_delta_rot_deg) {
+    // delta 门限可被调用方覆盖 (<=0 退回成员门限): SC 候选验证用 reloc.sc_max_delta_*
+    const double delta_trans_gate = max_delta_trans_m > 0.0 ? max_delta_trans_m : max_delta_trans_m_;
+    const double delta_rot_gate = max_delta_rot_deg > 0.0 ? max_delta_rot_deg : max_delta_rot_deg_;
+
     NdtResult result = Align(scan, candidate_pose);
     if (!result.valid) {
         LOG(WARNING) << "NdtCorrector: validate rejected (ndt not converged, or empty/sparse scan)";
@@ -186,7 +191,7 @@ NdtResult NdtCorrector::Validate(const SE3& candidate_pose, const CloudPtr& scan
     // 拒绝日志带 TP/delta/inlier/退化数值, 便于现场标定阈值.
     const bool conf_ok = result.confidence >= min_confidence_;
     const bool delta_ok =
-        result.delta_trans_m <= max_delta_trans_m_ && result.delta_rot_deg <= max_delta_rot_deg_;
+        result.delta_trans_m <= delta_trans_gate && result.delta_rot_deg <= delta_rot_gate;
     const bool inlier_ok = min_inlier_ratio_ <= 0.0 || result.inlier_ratio >= min_inlier_ratio_;
     const bool degen_ok = !degeneracy_reject_in_validate_ || !result.degenerate;
     if (!conf_ok || !delta_ok || !inlier_ok || !degen_ok) {
@@ -194,8 +199,8 @@ NdtResult NdtCorrector::Validate(const SE3& candidate_pose, const CloudPtr& scan
                      << (degen_ok ? "" : " (degenerate)")
                      << ": TP=" << result.confidence
                      << " (min=" << min_confidence_ << "), delta=" << result.delta_trans_m << "m/"
-                     << result.delta_rot_deg << "deg (max=" << max_delta_trans_m_ << "m/"
-                     << max_delta_rot_deg_ << "deg), inlier=" << result.inlier_ratio
+                     << result.delta_rot_deg << "deg (max=" << delta_trans_gate << "m/"
+                     << delta_rot_gate << "deg), inlier=" << result.inlier_ratio
                      << " (min=" << min_inlier_ratio_ << ")"
                      << ", trans_cr=" << result.trans_condition_ratio
                      << ", rot_cr=" << result.rot_condition_ratio;
@@ -203,9 +208,11 @@ NdtResult NdtCorrector::Validate(const SE3& candidate_pose, const CloudPtr& scan
         return result;
     }
 
+    // 接受日志同样带生效门限: SC 候选与 /initialpose 走不同 delta 门限, 现场需能区分
     LOG(INFO) << "NdtCorrector: validate accepted: TP=" << result.confidence
               << ", delta=" << result.delta_trans_m << "m/" << result.delta_rot_deg
-              << "deg, inlier=" << result.inlier_ratio
+              << "deg (max=" << delta_trans_gate << "m/" << delta_rot_gate
+              << "deg), inlier=" << result.inlier_ratio
               << ", trans_cr=" << result.trans_condition_ratio
               << ", rot_cr=" << result.rot_condition_ratio;
     return result;

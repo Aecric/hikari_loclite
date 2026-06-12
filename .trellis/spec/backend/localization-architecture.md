@@ -118,6 +118,67 @@ Current SC implementation references:
 
 - `include/hikari_loclite/lio/scan_context.h`
 - `src/lio/scan_context.cc`
+- `src/reloc/reloc_manager.cc` (query domain preparation)
+
+### SC Query Domain Contract (2026-06-12, bag-verified)
+
+The SC descriptor comparison only works when the query cloud lives in the
+**same domain as the database**. Three requirements, all mandatory; missing
+any one of them produced empty/never-matching candidates on zt_5201_map:
+
+1. **Gravity alignment**: the lidar is tilted-mounted (~62° on this rig); the
+   DB was built from level-frame clouds. Before `QueryTopK`, rotate the query
+   cloud into the level frame using the current LIO orientation:
+   `R_body_level = R_yaw_only.transpose() * R_world_body` (rotation only,
+   yaw removed — same formula as lightning `localization.cpp`
+   `TryScanContextRelocalization`). Implemented in
+   `RelocManager::GravityAlignCloud`.
+2. **Frame accumulation**: a single Mid360 scan is too sparse for a stable
+   descriptor. Accumulate `reloc.sc_accum_frames` (default 20) voxel-downsampled
+   deskewed scans, stitched into the latest frame's body frame via relative LIO
+   poses (`T_latest^-1 * T_i`). LIO is only locally consistent — guard stitching
+   with `reloc.sc_accum_max_rel_trans_m` (default 1.0 m): frames whose relative
+   translation to the last enqueued frame exceeds the gate are dropped, because
+   a diverged LIO (measured ~5 m/frame runaway after LOST) smears the merged
+   cloud into garbage. Clear the buffer on every `ResetToMapPose()` path and on
+   Arm/Disarm (pose-domain break would corrupt stitching).
+3. **DB-matched descriptor params**: the SC database file stores ring/sector
+   dims but **NOT** `pc_max_radius` / `lidar_height`. The query side must set
+   them in yaml to the values the DB was built with (lightning scan_context:
+   `sc_pc_max_radius: 15.0`, `sc_lidar_height: 1.0`, plus
+   `sc_dist_thres: 0.18`, `sc_top_k: 5`). Code defaults (80.0 / 2.0 / 0.13 / 1)
+   silently mismatch — always write these keys explicitly per map.
+
+Measured result: with all three in place, cold-start auto-SC self-localizes
+with no `/initialpose` (candidate kf_id at true pose, sc_dist 0.128 < 0.18,
+NDT TP 3.1).
+
+### Design Decision: SC-specific NDT validation delta gates
+
+**Context**: A correct SC candidate (TP=3.09, dt=0.299 m) was rejected because
+`dr=10.55° > ndt.max_delta_rot_deg=10.0`. SC yaw resolution is quantized at
+360/60 = 6° per sector and keyframe spacing makes >1 m translation deltas
+normal, so the `/initialpose`-calibrated `ndt.max_delta_*` gates (1 m/10°) are
+structurally too tight for SC candidates.
+
+**Decision**: `NdtCorrector::Validate` takes optional per-call gate overrides
+(`<=0` falls back to the member `ndt.*` gates). SC validation call sites pass
+`reloc.sc_max_delta_trans_m` (default 2.0) / `reloc.sc_max_delta_rot_deg`
+(default 15.0); the `/initialpose` site keeps the member gates. Accept/reject
+logs print the effective gates so field logs are unambiguous about which gate
+set was applied.
+
+#### Wrong
+
+Sharing one global `ndt.max_delta_*` gate set between `/initialpose`
+validation and SC candidate validation — tightening it for one silently breaks
+the other.
+
+#### Correct
+
+Per-source gates: `/initialpose` deltas are bounded by user-click accuracy;
+SC deltas are bounded by sector quantization + keyframe spacing. Tune each
+against its own error model.
 
 ## Explicit Non-Goals
 

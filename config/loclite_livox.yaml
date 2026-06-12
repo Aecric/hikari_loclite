@@ -50,13 +50,33 @@ reloc:
   auto_on_init: true                    # 冷启动时自动尝试 SC (不依赖 /initialpose)
   auto_on_lost: true                    # LOST 态自动 arm SC 恢复
   disable_after_good: true              # Good 态 disarm SC, 不消耗 CPU
-  sc_top_k: 1                           # SC QueryTopK 候选数 (bounded, 非持久 worker)
+  sc_top_k: 5                           # SC QueryTopK 候选数 (原 1; 多候选 + 重力检查 + NDT 验证逐个过滤)
   sc_cooldown_sec: 5.0                  # SC 尝试冷却时间 (秒)
   max_runtime_sec: 10.0                 # SC 重定位最大运行时间 (秒)
   sc_database: ""                       # SC 数据库路径; 为空时自动从 map_path/sc_database.bin 加载
   poses_txt: ""                         # 关键帧位姿路径; 为空时自动从 map_path/poses.txt 加载
   gravity_roll_thres_deg: 30.0          # SC 候选重力 roll 一致性阈值 (度)
   gravity_pitch_thres_deg: 30.0         # SC 候选重力 pitch 一致性阈值 (度)
+
+  # ==== SC 查询域对齐 (Phase 3) ====
+  # 描述子几何参数必须与建库侧 (lightning default_livox.yaml scan_context 段) 完全一致:
+  # DB 文件只存 ring/sector, 不存 radius/height → 查询侧只能靠配置对齐, 错配 = 空候选/错候选.
+  sc_pc_max_radius: 15.0                # SC 极坐标最大半径 (m); 必须与建库参数一致 (代码默认 80.0 错配)
+  sc_lidar_height: 1.0                  # SC 建库雷达高度 (m); 必须与建库参数一致 (代码默认 2.0 错配)
+  sc_dist_thres: 0.18                   # SC 距离阈值; lightning 同图实测可用值 (代码默认 0.13 过严)
+  # 查询点云滚动累积: armed (init/LOST) 期间逐帧体素降采样入环形缓冲, SC 尝试时按相对 LIO
+  # 位姿统一到最新帧 body 系合并 + 重力对齐后查询; 帧数不足时跳过尝试等下个 cooldown.
+  sc_accum_frames: 20                   # 滚动累积帧数 (单帧太稀, 倾斜安装下 SC 描述子不稳定)
+  sc_accum_voxel_leaf: 0.1              # 累积帧入队前 + 合并后的体素降采样 leaf (m); 控制 20 帧合计点数在几万点级
+  sc_accum_max_rel_trans_m: 1.0         # 累积发散守门: 与上一入队帧相对平移超此值不入队 (LOST 后 LIO 速度积分跑飞实测 ~5m/帧, 拼接糊掉查询云); 不清空缓冲, 环形 pop 自然换血
+
+  # ==== SC 候选验证专用 delta 门限 ====
+  # 仅 SC 候选验证使用; /initialpose 验证保持 ndt.max_delta_* 原门限.
+  # ndt.* 门限 (1m/10°) 按 /initialpose 量纲设定, 对 SC 候选过紧: SC sector 分辨率 360/60=6°,
+  # yaw_diff 量化误差 + 斜装近似使正确候选 delta_rot 常落 6~12° (实测正确候选 dr=10.55° > 10°
+  # 被拒, 而 TP=3.09 极好); 关键帧间距也使 delta_trans 可超 1m.
+  sc_max_delta_trans_m: 2.0             # SC 候选 NDT 验证: 收敛位姿相对候选的平移上限 (m)
+  sc_max_delta_rot_deg: 15.0            # SC 候选 NDT 验证: 收敛位姿相对候选的旋转上限 (deg)
 
 runtime:
   publish_tf: true                      # map→base_link 与 lidar_frame→level_frame TF
