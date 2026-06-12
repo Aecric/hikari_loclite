@@ -126,7 +126,7 @@ class LocLiteNode : public rclcpp::Node {
     int init_accum_points_ = 0;
     double init_accum_first_ts_ = -1.0;
     double init_accum_window_start_ts_ = -1.0;
-    double blackout_deadline_sec_ = 0.0;  // SC 自动注入阻断窗口截止时刻 (initialpose blackout)
+    double blackout_deadline_sec_ = 0.0;  // SC 自动注入阻断窗口截止时刻 (initialpose blackout, 墙钟域, 勿与 scan ts 比较)
     double lost_enter_ts_ = -1.0;         // Lost 进入时刻 (传感器时间), 供 lost_timeout_sec 计时
     double last_ndt_correct_ts_ = -1.0;   // Good 态 NDT 校正节流时刻
     double last_ndt_confidence_ = 0.0;    // 最近一次 NdtResult.confidence, 供 marker 显示

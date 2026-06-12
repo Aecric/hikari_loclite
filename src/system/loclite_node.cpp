@@ -946,14 +946,17 @@ void LocLiteNode::TryScRelocalize(const CloudPtr& scan, double ts, bool manual) 
     last_sc_attempt_ts_ = ts;
 
     // Blackout check: block automatic SC during /initialpose blackout window
-    if (!manual && ts < blackout_deadline_sec_) {
+    // 时钟域: deadline 由 /initialpose 回调用墙钟设定, 比较必须同为墙钟.
+    // bag 回放时 scan ts 远小于墙钟, 若用 ts 比较 blackout 永真, SC 自动注入被永久阻断.
+    const double wall_now = this->now().seconds();
+    if (!manual && wall_now < blackout_deadline_sec_) {
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                             "[SC-Reloc] in blackout window (until t=%.3f), skipping SC attempt", blackout_deadline_sec_);
+                             "[SC-Reloc] in blackout window (wall_now=%.3f < deadline=%.3f), skipping SC attempt",
+                             wall_now, blackout_deadline_sec_);
         return;
     }
 
     const SE3 current_imu_pose = lio_->LatestState().GetPose();
-    const double wall_now = this->now().seconds();
     RelocCandidate candidate;
     if (manual) {
         candidate = reloc_->ManualRelocalize(scan, current_imu_pose);
