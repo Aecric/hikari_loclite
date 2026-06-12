@@ -51,6 +51,8 @@ ARG LIVOX_DEB_REPO=Aecric/livox_ros_driver2
 ARG LIVOX_DEB_TAG=1.2.6.1
 ARG LIVOX_DEB_VERSION=auto
 
+COPY docker2/resolve_livox_deb.py /tmp/resolve_livox_deb.py
+
 RUN if [ "$TARGETARCH" = "arm64" ]; then LIVOX_ARCH="arm64"; else LIVOX_ARCH="amd64"; fi && \
     if [ "${LIVOX_DEB_VERSION}" = "auto" ]; then \
         if [ "${LIVOX_DEB_TAG}" = "latest" ]; then \
@@ -60,7 +62,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then LIVOX_ARCH="arm64"; else LIVOX_ARCH="am
         fi && \
         echo "Resolving livox deb from ${RELEASE_API}" && \
         curl --retry 5 --retry-delay 2 --retry-all-errors -fSL "${RELEASE_API}" -o /tmp/livox-release.json && \
-        python3 docker2/resolve_livox_deb.py \
+        python3 /tmp/resolve_livox_deb.py \
             --release-json /tmp/livox-release.json \
             --ros-distro "${ROS_DISTRO}" \
             --ubuntu-codename "${UBUNTU_CODENAME}" \
@@ -76,7 +78,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then LIVOX_ARCH="arm64"; else LIVOX_ARCH="am
     echo "Fetching livox deb: ${LIVOX_DEB_URL}" && \
     curl --retry 5 --retry-delay 2 --retry-all-errors -fSL "${LIVOX_DEB_URL}" -o /tmp/livox.deb && \
     dpkg -i /tmp/livox.deb && \
-    rm -f /tmp/livox.deb /tmp/livox-url.tsv
+    rm -f /tmp/livox.deb /tmp/livox-url.tsv /tmp/resolve_livox_deb.py
 
 RUN rosdep init 2>/dev/null || true && \
     for i in 1 2 3; do \
