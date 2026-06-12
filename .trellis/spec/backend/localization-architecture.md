@@ -64,6 +64,15 @@ NDT is a validator and low-frequency corrector, not the primary tracking loop.
 
 - Use NDT to validate `/initialpose` and relocalization candidates.
 - In Good state, NDT correction should be low-rate and gain-limited.
+  **Calibrated 2026-06-12 (zt_5201 corridor, user-verified perfect tracking):
+  `ndt.good_rate_hz: 3.0` + `ndt.gain_good: 0.2`.** The original 1 Hz + 0.5
+  single-shot cadence let corridor drift outrun the correction loop (silent
+  GOOD-state divergence); continuous small-gain pulls at 3 Hz mirror
+  lightning's frame-rate trust-blended correction (conf→trust 0.1–0.3) and
+  were sufficient on their own — front-end swap was NOT needed (lightning +
+  fast_lio_aa offline replay also tracks this bag end-to-end). Prefer raising
+  rate / lowering gain over the reverse; budget NDT per-align cost on the
+  target CPU before raising further.
 - Reject corrections beyond configured translation/rotation bounds via the
   smoother gate (see runtime-and-relocalization "Pose Output Gating").
 - NDT result structs carry `valid`, confidence (TP), `inlier_ratio`, translation
