@@ -113,3 +113,98 @@ sudo setcap cap_sys_nice+ep /home/aecriclin/3d_slam_ws/install/hikari_loclite/li
 
 Keep systemd, CPU affinity, watchdog, and log-rate work in productization tasks;
 do not hide those assumptions inside algorithm code.
+
+## Debian Packaging Contract
+
+### 1. Scope / Trigger
+
+Use this contract when changing `build.sh`, `docker2/`, or
+`.github/workflows/docker-build.yml`. These files are the supported path for
+producing release `.deb` artifacts outside the developer container.
+
+### 2. Signatures
+
+Local package build:
+
+```bash
+ROS_DISTRO=humble UBUNTU_CODENAME=jammy TARGETARCH=amd64 BUILD_JOBS=2 ./build.sh
+```
+
+Direct Docker buildx equivalent:
+
+```bash
+docker buildx build \
+  --platform linux/amd64 \
+  --file docker2/Dockerfile \
+  --target export \
+  --build-arg ROS_DISTRO=humble \
+  --build-arg UBUNTU_CODENAME=jammy \
+  --build-arg BUILD_JOBS=2 \
+  --output type=local,dest=/tmp/hikari-loclite-deb-test \
+  .
+```
+
+### 3. Contracts
+
+- `build.sh` must preserve these environment keys:
+  `ROS_DISTRO`, `UBUNTU_CODENAME`, `TARGETARCH`, `BUILD_JOBS`, `OUTPUT_DIR`,
+  `LIVOX_DEB_TAG`, and `LIVOX_DEB_VERSION`.
+- The Dockerfile must export from a `scratch` stage named `export`, containing
+  only generated `.deb` files.
+- Release packaging must build `-DCMAKE_BUILD_TYPE=Release`.
+- Before running `bloom-generate`, the Dockerfile must remove
+  `livox_ros_driver2` and `rosbag2_cpp` from the copied `package.xml`.
+  `livox_ros_driver2` is then injected into `debian/control` as
+  `ros-${ROS_DISTRO}-livox-ros-driver2`; `rosbag2_cpp` must stay out of the
+  release package dependencies.
+- Maintainer scripts must target
+  `/opt/ros/${ROS_DISTRO}/lib/hikari_loclite/run_loclite_online` for
+  `cap_sys_nice+ep`, and must register both `/opt/ros/${ROS_DISTRO}/lib` and
+  `/opt/ros/${ROS_DISTRO}/lib/hikari_loclite` with `ldconfig`.
+
+### 4. Validation & Error Matrix
+
+| Condition | Expected behavior |
+|-----------|-------------------|
+| Missing Livox release asset | Docker build fails during Livox asset resolution with distro/codename/arch details |
+| `rosbag2_cpp` appears in generated deb Depends | Packaging change is invalid; Release packages must not carry offline-only deps |
+| `run_loclite_online` missing during postinst | Postinst logs a warning and skips `setcap`, not a hard install failure |
+| `BUILD_JOBS` too high locally | `build.sh` warns based on available memory before continuing |
+
+### 5. Good/Base/Bad Cases
+
+- Good: `ros-humble-hikari-loclite_*.deb` contains
+  `lib/hikari_loclite/run_loclite_online`, depends on
+  `ros-humble-livox-ros-driver2`, and does not depend on `ros-humble-rosbag2-cpp`.
+- Base: `docker buildx build --check --file docker2/Dockerfile .` reports no
+  Dockerfile parse warnings.
+- Bad: copying `lightning-lm` packaging files without changing package names,
+  binary paths, Release text, or maintainer script paths.
+
+### 6. Tests Required
+
+- `bash -n build.sh`
+- `python3 -m py_compile docker2/inject_control_dep.py`
+- YAML parse check for `.github/workflows/docker-build.yml`
+- `docker buildx build --check --file docker2/Dockerfile .`
+- At least one amd64 export build before claiming packaging is green:
+  `docker buildx build --platform linux/amd64 ... --target export ...`
+- Inspect the generated deb with `dpkg-deb -I` and confirm package name,
+  architecture, and dependencies.
+
+### 7. Wrong vs Correct
+
+Wrong:
+
+```bash
+bloom-generate rosdebian
+# package.xml still includes livox_ros_driver2 and rosbag2_cpp
+```
+
+Correct:
+
+```bash
+python3 -c "from pathlib import Path; import re; path=Path('package.xml'); text=re.sub(r'  <depend>(livox_ros_driver2|rosbag2_cpp)</depend>\n', '', path.read_text()); path.write_text(text)"
+bloom-generate rosdebian --os-name ubuntu --os-version "$UBUNTU_CODENAME" --ros-distro "$ROS_DISTRO"
+python3 docker2/inject_control_dep.py debian/control "ros-${ROS_DISTRO}-livox-ros-driver2"
+```

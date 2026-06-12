@@ -1,0 +1,16 @@
+#!/bin/sh
+# Auto-installed by hikari_loclite .deb (generated from docker2/postrm.in).
+set -e
+
+LDCONFIG_FILE="/etc/ld.so.conf.d/ros-__ROS_DISTRO__-hikari-loclite.conf"
+
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    rm -f "$LDCONFIG_FILE"
+    if command -v ldconfig >/dev/null 2>&1; then
+        ldconfig
+    fi
+fi
+
+# DEBHELPER #
+
+exit 0

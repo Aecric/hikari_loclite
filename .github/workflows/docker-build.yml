@@ -1,0 +1,250 @@
+name: Build hikari_loclite DEB
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      build_jobs:
+        description: 'Parallel build jobs'
+        required: false
+        default: '4'
+        type: string
+      swap_size_gb:
+        description: 'Swap size in GB'
+        required: false
+        default: '16'
+        type: string
+      release_tag:
+        description: 'Release tag (e.g. v0.1.0 or leave empty for timestamp / git tag)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - name: Determine release tag and Debian version
+        id: tag
+        run: |
+          set -eu
+          RAW_TAG=""
+          if [ -n "${{ inputs.release_tag }}" ]; then
+              RAW_TAG="${{ inputs.release_tag }}"
+              SOURCE="workflow_dispatch input"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+              RAW_TAG="${{ github.ref_name }}"
+              SOURCE="git tag push"
+          fi
+
+          if [ -n "$RAW_TAG" ]; then
+              TAG="$RAW_TAG"
+              VERSION="${RAW_TAG#v}"
+              VERSION="$(echo "$VERSION" | tr ':_' '..')"
+              [ -z "$VERSION" ] && VERSION="0.0.0~empty"
+              if ! echo "$VERSION" | grep -qE '^[0-9]'; then
+                  echo "::error::Invalid version '$VERSION' derived from tag '$RAW_TAG' - must start with a digit"
+                  exit 1
+              fi
+          else
+              TIMESTAMP="$(date -u +'%Y%m%d-%H%M%S')"
+              SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
+              TAG="build-${TIMESTAMP}"
+              VERSION="0.0.0~dev.${SHORT_SHA}"
+              SOURCE="dev snapshot"
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "::notice::Release tag = $TAG (source: $SOURCE)"
+          echo "::notice::Debian version = $VERSION"
+
+  build:
+    needs: setup
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    continue-on-error: ${{ matrix.experimental }}
+    name: build-${{ matrix.distro }}-${{ matrix.codename }}-${{ matrix.arch }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: humble
+            codename: jammy
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            need_qemu: false
+            build_jobs: ${{ inputs.build_jobs || '4' }}
+            livox_deb_tag: '1.2.6.1'
+            livox_deb_version: auto
+            experimental: false
+          - distro: humble
+            codename: jammy
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+            need_qemu: false
+            build_jobs: '6'
+            livox_deb_tag: '1.2.6.1'
+            livox_deb_version: auto
+            experimental: false
+          # Enable after matching livox_ros_driver2 release assets are available.
+          # - distro: jazzy
+          #   codename: noble
+          #   arch: arm64
+          #   platform: linux/arm64
+          #   runner: ubuntu-24.04-arm
+          #   need_qemu: false
+          #   build_jobs: ${{ inputs.build_jobs || '4' }}
+          #   livox_deb_tag: '1.2.6.1'
+          #   livox_deb_version: auto
+          #   experimental: true
+          # - distro: jazzy
+          #   codename: noble
+          #   arch: amd64
+          #   platform: linux/amd64
+          #   runner: ubuntu-24.04
+          #   need_qemu: false
+          #   build_jobs: '6'
+          #   livox_deb_tag: '1.2.6.1'
+          #   livox_deb_version: auto
+          #   experimental: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Inject release version into package.xml
+        env:
+          PKG_VERSION: ${{ needs.setup.outputs.version }}
+        run: |
+          set -eu
+          if [ -z "$PKG_VERSION" ]; then
+              echo "ERROR: setup job did not produce a version" >&2
+              exit 1
+          fi
+          sed -i -E "s|<version>[^<]*</version>|<version>${PKG_VERSION}</version>|" package.xml
+          grep -n '<version>' package.xml
+          if command -v xmllint >/dev/null 2>&1; then
+              xmllint --noout package.xml
+          fi
+
+      - name: Free up disk space
+        run: |
+          echo "=== Disk usage BEFORE cleanup ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
+                      "$AGENT_TOOLSDIRECTORY" /usr/local/lib/android \
+                      /usr/share/swift /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
+          echo "=== Disk usage AFTER cleanup ==="
+          df -h /
+
+      - name: Set up swap space
+        env:
+          REQUESTED_SWAP_GB: ${{ inputs.swap_size_gb || '16' }}
+        run: |
+          set -eu
+          SWAP_SIZE_GB="$REQUESTED_SWAP_GB"
+          if ! echo "$SWAP_SIZE_GB" | grep -qE '^[0-9]+$'; then
+              echo "::error::swap_size_gb must be an integer, got '$SWAP_SIZE_GB'"
+              exit 1
+          fi
+
+          FREE_GB=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+          MAX_SWAP_GB=$((FREE_GB - 3))
+          if [ "$MAX_SWAP_GB" -le 0 ]; then
+              echo "Skip swap: only ${FREE_GB}GB free on / after cleanup"
+              free -h
+              exit 0
+          fi
+          if [ "$SWAP_SIZE_GB" -gt "$MAX_SWAP_GB" ]; then
+              echo "::warning::Requested ${SWAP_SIZE_GB}GB swap but only ${FREE_GB}GB free on /. Using ${MAX_SWAP_GB}GB."
+              SWAP_SIZE_GB="$MAX_SWAP_GB"
+          fi
+
+          sudo swapoff -a
+          sudo rm -f /swapfile /mnt/swapfile
+          sudo fallocate -l "${SWAP_SIZE_GB}G" /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
+      - name: Set up QEMU
+        if: matrix.need_qemu
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: ${{ matrix.arch }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          driver-opts: network=host
+
+      - name: Show build environment
+        run: |
+          echo "Runner: ${{ matrix.runner }}"
+          echo "Arch: $(uname -m), target ${{ matrix.arch }} (${{ matrix.platform }})"
+          echo "Distro: ${{ matrix.distro }} / ${{ matrix.codename }}"
+          echo "Livox: tag=${{ matrix.livox_deb_tag }} version=${{ matrix.livox_deb_version }}"
+          echo "Experimental: ${{ matrix.experimental }}"
+          echo "BUILD_JOBS: ${{ matrix.build_jobs }}"
+          free -h
+          df -h /
+
+      - name: Build and extract DEB packages
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker2/Dockerfile
+          platforms: ${{ matrix.platform }}
+          target: export
+          build-args: |
+            ROS_DISTRO=${{ matrix.distro }}
+            UBUNTU_CODENAME=${{ matrix.codename }}
+            BUILD_JOBS=${{ matrix.build_jobs }}
+            LIVOX_DEB_TAG=${{ matrix.livox_deb_tag }}
+            LIVOX_DEB_VERSION=${{ matrix.livox_deb_version }}
+          cache-from: type=gha,scope=hikari-loclite-${{ matrix.distro }}-${{ matrix.codename }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=hikari-loclite-${{ matrix.distro }}-${{ matrix.codename }}-${{ matrix.arch }}
+          outputs: type=local,dest=./deb_output
+
+      - name: List generated DEB files
+        run: |
+          find deb_output -name "*.deb" -exec ls -lh {} \;
+          FIRST_DEB=$(find deb_output -name "*.deb" | head -1)
+          if [ -z "$FIRST_DEB" ]; then
+              echo "ERROR: no .deb files found!"
+              exit 1
+          fi
+          dpkg-deb -I "$FIRST_DEB"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.setup.outputs.tag }}
+          name: "hikari_loclite DEB - ${{ needs.setup.outputs.tag }}"
+          body: |
+            ROS2 hikari_loclite DEB packages.
+
+            - Built from commit: ${{ github.sha }}
+            - Targets:
+              * `ros-humble-hikari-loclite_*` - Ubuntu 22.04 (Jammy)
+            - Install:
+              `sudo dpkg -i ros-humble-livox-ros-driver2_*.deb ros-humble-hikari-loclite_*.deb && sudo apt install -f`
+          files: deb_output/*.deb
+          draft: false
+          prerelease: true
+          make_latest: false

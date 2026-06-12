@@ -1,0 +1,59 @@
+#!/bin/sh
+# Auto-installed by hikari_loclite .deb (generated from docker2/postinst.in).
+# run_loclite_online receives cap_sys_nice so it can set CPU affinity /
+# realtime scheduling without root. File capabilities trigger glibc
+# secure-execution, so register package library paths with ldconfig.
+set -e
+
+ROS_PREFIX="/opt/ros/__ROS_DISTRO__"
+LDCONFIG_FILE="/etc/ld.so.conf.d/ros-__ROS_DISTRO__-hikari-loclite.conf"
+TARGET_BIN="$ROS_PREFIX/lib/hikari_loclite/run_loclite_online"
+
+write_ldconfig_conf() {
+    tmp="${LDCONFIG_FILE}.tmp"
+    : > "$tmp"
+
+    for path in \
+        "$ROS_PREFIX/lib" \
+        "$ROS_PREFIX/lib/hikari_loclite" \
+        "$ROS_PREFIX/lib/aarch64-linux-gnu" \
+        "$ROS_PREFIX/lib/x86_64-linux-gnu"; do
+        if [ -d "$path" ]; then
+            echo "$path" >> "$tmp"
+        fi
+    done
+
+    if [ -s "$tmp" ]; then
+        mv "$tmp" "$LDCONFIG_FILE"
+        if command -v ldconfig >/dev/null 2>&1; then
+            ldconfig
+        else
+            echo "hikari_loclite: ldconfig not found; dynamic linker cache was not refreshed." >&2
+        fi
+    else
+        rm -f "$tmp"
+        echo "hikari_loclite: $ROS_PREFIX/lib not found; dynamic linker path not configured." >&2
+    fi
+}
+
+if [ "$1" = "configure" ]; then
+    write_ldconfig_conf
+
+    if [ -x "$TARGET_BIN" ]; then
+        if command -v setcap >/dev/null 2>&1; then
+            if setcap cap_sys_nice+ep "$TARGET_BIN" 2>/dev/null; then
+                echo "hikari_loclite: setcap cap_sys_nice+ep $TARGET_BIN OK"
+            else
+                echo "hikari_loclite: setcap failed ($TARGET_BIN); realtime scheduling will be disabled." >&2
+            fi
+        else
+            echo "hikari_loclite: setcap not found; install libcap2-bin then run 'setcap cap_sys_nice+ep $TARGET_BIN'." >&2
+        fi
+    else
+        echo "hikari_loclite: $TARGET_BIN not found, skipping setcap." >&2
+    fi
+fi
+
+# DEBHELPER #
+
+exit 0

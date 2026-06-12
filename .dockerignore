@@ -1,0 +1,16 @@
+.git
+.github
+.trellis
+.agents
+.codex
+.claude
+.vscode
+CMakeFiles
+build
+install
+log
+debs
+runtime.log
+*.pdf
+*.pyc
+__pycache__
