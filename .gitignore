@@ -7,3 +7,4 @@ install/
 *.tmp
 __pycache__/
 *.pyc
+*.txt
