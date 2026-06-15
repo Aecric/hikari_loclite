@@ -105,3 +105,39 @@ Implemented RelocManager module and wired Scan Context into hikari_loclite for b
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: Phase6 产品化 + ZUPT 标定收尾
+
+**Date**: 2026-06-15
+**Task**: Phase6 产品化 + ZUPT 标定收尾
+**Branch**: `master`
+
+### Summary
+
+Phase6 产品化运行时优先三项+薄 systemd unit: CPU亲和/SCHED_FIFO(realtime_setup, 无cap优雅降级)、输入掉线watchdog+/hikari_loc/status富状态话题、LOG_EVERY_T时间式日志限频、hikari-loclite.service.in(@ROS_DISTRO@占位避开Dockerfile sed, postinst渲染不enable)。trellis-check 0 issue, 容器Release编译通过。ZUPT 静止检测改 Schmitt 死区双阈值+2026-06-15现场标定回填。混在工作树的 config 调优按任务拆 3 提交: zupt/sc-reloc(auto_on_lost等)/mid360-init。spec 更新: @ROS_DISTRO@占位约定 + LOG_EVERY_T。未做: 完整.deb export构建+真机实测。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f09a7de` | (see git log) |
+| `d0d69fc` | (see git log) |
+| `4ac7ad9` | (see git log) |
+| `1d930e0` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
