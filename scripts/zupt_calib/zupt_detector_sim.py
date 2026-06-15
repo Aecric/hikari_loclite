@@ -13,17 +13,21 @@ zupt_detector_sim.py — ZUPT 标定工具 (2/2): 静止检测器在线仿真
 
 用法:
   python3 zupt_detector_sim.py --ros-args \
-    -p gyro_std_thres:=0.01 -p acc_std_thres:=0.15 \
+    -p gyro_std_enter_thres:=0.010 -p gyro_std_exit_thres:=0.025 -p acc_std_thres:=0.008 \
     -p window_sec:=0.5 -p park_enter_frames:=10 -p park_exit_frames:=3
 
 参数 (与 C++ fast_lio.zupt_* 一一对应):
-  imu_topic          (string, /livox/imu)
-  window_sec         (double, 0.5)   滑窗时长
-  gyro_std_thres     (double, 0.01)  gyro 模 std 静止阈值 (rad/s) — 用 imu_static_stats 的建议值
-  acc_std_thres      (double, 0.15)  acc 模 std 静止阈值 (m/s^2)
-  park_enter_frames  (int,    10)    连续 raw_static 多少帧才进 STATIC (进慢)
-  park_exit_frames   (int,    3)     连续 raw_moving 多少帧才出 STATIC (出快)
-  warmup_frames      (int,    50)    启动前丢弃帧数 (等滑窗填满/IMU 稳定)
+  imu_topic            (string, /livox/imu)
+  window_sec           (double, 0.5)    滑窗时长
+  gyro_std_enter_thres (double, 0.010)  gyro 模 std 进静止阈值 (rad/s, 低) — 须 < exit, 安静谷
+  gyro_std_exit_thres  (double, 0.025)  gyro 模 std 出静止阈值 (rad/s, 高) — 振动峰之上/真实运动之下
+  acc_std_thres        (double, 0.008)  acc 模 std 静止阈值 (m/s^2, 单阈值)
+  park_enter_frames    (int,    10)     连续 wants_static 多少帧才进 STATIC (进慢)
+  park_exit_frames     (int,    3)      连续 wants_moving 多少帧才出 STATIC (出快)
+  warmup_frames        (int,    50)     启动前丢弃帧数 (等滑窗填满/IMU 稳定)
+
+Schmitt 死区: gyro_std 落在 [enter, exit] 带内时既不算 wants_static 也不算 wants_moving,
+对应计数清零, 保持当前态 —— 解决静止 gyro 真实机械振动 straddle 单阈值致 <1s 快翻.
 """
 
 import math
@@ -44,8 +48,9 @@ class ZuptDetectorSim(Node):
         super().__init__("zupt_detector_sim")
         self.imu_topic = self.declare_parameter("imu_topic", "/livox/imu").value
         self.window_sec = float(self.declare_parameter("window_sec", 0.5).value)
-        self.gyro_thres = float(self.declare_parameter("gyro_std_thres", 0.01).value)
-        self.acc_thres = float(self.declare_parameter("acc_std_thres", 0.15).value)
+        self.gyro_enter_thres = float(self.declare_parameter("gyro_std_enter_thres", 0.010).value)
+        self.gyro_exit_thres = float(self.declare_parameter("gyro_std_exit_thres", 0.025).value)
+        self.acc_thres = float(self.declare_parameter("acc_std_thres", 0.008).value)
         self.enter_frames = int(self.declare_parameter("park_enter_frames", 10).value)
         self.exit_frames = int(self.declare_parameter("park_exit_frames", 3).value)
         self.warmup_frames = int(self.declare_parameter("warmup_frames", 50).value)
@@ -67,9 +72,11 @@ class ZuptDetectorSim(Node):
         self.sub = self.create_subscription(Imu, self.imu_topic, self.on_imu, 200)
         self.get_logger().info(
             "zupt_detector_sim 已启动 | topic=%s window=%.2fs\n"
-            "  阈值 gyro_std<%.5f & acc_std<%.4f | 迟滞 enter=%d exit=%d | warmup=%d\n"
+            "  gyro Schmitt 死区: enter<%.5f 进 / exit>%.5f 出 (带内保持) | acc_std<%.4f\n"
+            "  迟滞 enter=%d exit=%d | warmup=%d\n"
             "  请站立<->慢走交替, 观察 STATIC/MOVING 翻转是否合理"
-            % (self.imu_topic, self.window_sec, self.gyro_thres, self.acc_thres,
+            % (self.imu_topic, self.window_sec,
+               self.gyro_enter_thres, self.gyro_exit_thres, self.acc_thres,
                self.enter_frames, self.exit_frames, self.warmup_frames)
         )
 
@@ -105,31 +112,46 @@ class ZuptDetectorSim(Node):
         arr = np.array(self.buf, dtype=float)
         gyro_norm_std = np.linalg.norm(arr[:, 1:4], axis=1).std()
         acc_norm_std = np.linalg.norm(arr[:, 4:7], axis=1).std()
-        raw_static = (gyro_norm_std < self.gyro_thres) and (acc_norm_std < self.acc_thres)
+        # Schmitt 死区双阈值: gyro_std 落在 [enter, exit] 带内时两者皆 False → 计数清零 → 保持当前态.
+        wants_static = (gyro_norm_std < self.gyro_enter_thres) and (acc_norm_std < self.acc_thres)
+        wants_moving = (gyro_norm_std > self.gyro_exit_thres) or (acc_norm_std > self.acc_thres)
 
-        # 非对称迟滞
-        if raw_static:
-            self.enter_cnt += 1
-            self.exit_cnt = 0
-            if not self.is_static and self.enter_cnt >= self.enter_frames:
-                self.flip(True, t)
+        # 状态相关的非对称迟滞 (与 C++ StaticDetector 逐分支一致)
+        if not self.is_static:
+            if wants_static:
+                self.enter_cnt += 1
+                if self.enter_cnt >= self.enter_frames:
+                    self.flip(True, t)
+            else:
+                self.enter_cnt = 0
         else:
-            self.exit_cnt += 1
-            self.enter_cnt = 0
-            if self.is_static and self.exit_cnt >= self.exit_frames:
-                self.flip(False, t)
+            if wants_moving:
+                self.exit_cnt += 1
+                if self.exit_cnt >= self.exit_frames:
+                    self.flip(False, t)
+            else:
+                self.exit_cnt = 0
+
+        # raw 三态显示: wants_static / 带内保持 / wants_moving, 便于现场判读死区是否合适.
+        if wants_static:
+            raw_str = "static"
+        elif wants_moving:
+            raw_str = "moving"
+        else:
+            raw_str = "hold"
 
         # 实时状态行 (5Hz)
         if (t - self.last_status_t) >= 0.2:
             self.last_status_t = t
             held = (t - self.state_since_t) if self.state_since_t else 0.0
             print(
-                "\r[%-7s %5.1fs] raw=%-7s gyro_std=%.5f acc_std=%.4f "
+                "\r[%-7s %5.1fs] raw=%-7s gyro_std=%.5f (enter<%.4f exit>%.4f) acc_std=%.4f "
                 "(enter %d/%d, exit %d/%d)   "
                 % (
                     "STATIC" if self.is_static else "MOVING", held,
-                    "static" if raw_static else "moving",
-                    gyro_norm_std, acc_norm_std,
+                    raw_str,
+                    gyro_norm_std, self.gyro_enter_thres, self.gyro_exit_thres,
+                    acc_norm_std,
                     self.enter_cnt, self.enter_frames,
                     self.exit_cnt, self.exit_frames,
                 ),
@@ -153,14 +175,15 @@ class ZuptDetectorSim(Node):
         print("\n" + "=" * 60)
         print("ZUPT 检测器仿真 汇总")
         print("=" * 60)
-        print("参数: gyro_std<%.5f & acc_std<%.4f, enter=%d exit=%d window=%.2fs"
-              % (self.gyro_thres, self.acc_thres,
+        print("参数: gyro_std enter<%.5f exit>%.5f & acc_std<%.4f, enter=%d exit=%d window=%.2fs"
+              % (self.gyro_enter_thres, self.gyro_exit_thres, self.acc_thres,
                  self.enter_frames, self.exit_frames, self.window_sec))
         print("状态翻转次数=%d" % self.transitions)
         print("累计 STATIC=%.1fs  MOVING=%.1fs" % (self.static_total, self.moving_total))
         print("-" * 60)
         print("判读: 静止时应稳定停在 STATIC 不抖; 一开始动应在 ~exit*帧间隔内退出;")
-        print("      慢走若误进 STATIC -> 调大 thres 或 enter_frames。参数合适即填入 yaml。")
+        print("      慢走若误进 STATIC -> 调小 enter_thres 或调大 enter_frames; 静止若误出 -> 调大 exit_thres。")
+        print("      raw=hold 表示 gyro_std 落在死区 [enter,exit] 带内, 此时保持当前态。参数合适即填入 yaml。")
         print("=" * 60)
 
 

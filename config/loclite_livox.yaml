@@ -135,15 +135,17 @@ fast_lio:
 
   # ==== ZUPT 零速更新 (Phase 1, 治走廊静止沿轴蠕动; NDT 在退化方向无效, 与 NDT 正交) ====
   # 触发: StaticDetector.is_static (滑窗 IMU std + 非对称迟滞) && EKF 速度模 < zupt_vel_gate.
-  # 静止/迟滞参数需用 scripts/zupt_calib/{imu_static_stats,zupt_detector_sim}.py 现场标定后回填.
+  # 标定 2026-06-15 (zt_5201, IMU≈200Hz): gyro 静止噪底贴 0.005~0.006 抖, 阈值须抬出噪带→0.010;
+  # exit=3(≈15ms)会被毛刺弹出致 <1s 快翻, 抬到 8(≈40ms)仍"快出". enter/exit/warmup 单位=IMU样本.
   zupt_enabled: true
   zupt_vel_gate: 0.05            # m/s, EKF 速度模 < 此才允许 ZUPT (第一道闸)
   zupt_vel_cov: 1.0e-3          # 零速伪观测噪声 (越小钳得越硬)
-  static_gyro_std_thres: 0.01   # rad/s, gyro 模 std 静止阈值 [待 imu_static_stats.py 标定]
-  static_acc_std_thres: 0.15    # m/s^2, acc 模 std 静止阈值 [待 imu_static_stats.py 标定]
+  static_gyro_std_enter_thres: 0.010  # rad/s, 进静止: gyro 模 std 须<此 (≈静止安静期的谷); 须 < exit
+  static_gyro_std_exit_thres: 0.025   # rad/s, 出静止: gyro 模 std 须>此 (高于振动峰~0.017, 低于真实运动≫0.05)
+  static_acc_std_thres: 0.008   # m/s^2, acc 模 std 静止阈值 (标定静止噪底~0.004 + margin)
   static_window_sec: 0.5        # 静止检测滑窗 (秒), 与标定时一致
-  zupt_park_enter_frames: 10    # 连续静止多少 IMU 样本才进泊车 (进慢) [zupt_detector_sim.py 标定]
-  zupt_park_exit_frames: 3      # 连续运动多少 IMU 样本才出泊车 (出快) [同上]
+  zupt_park_enter_frames: 20    # 连续静止多少 IMU 样本才进泊车 (进慢, ≈0.1s@200Hz)
+  zupt_park_exit_frames: 8      # 连续运动多少 IMU 样本才出泊车 (快出, ≈0.04s; 忽略<40ms毛刺)
   zupt_warmup_frames: 50        # 启动丢弃 IMU 样本数
 
 roi:

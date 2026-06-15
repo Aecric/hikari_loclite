@@ -77,8 +77,9 @@ bool FastLioFixedMap::Init(const std::string& yaml_path) {
         zupt_vel_gate_ = fl["zupt_vel_gate"].as<double>(0.05);
         zupt_vel_cov_ = fl["zupt_vel_cov"].as<double>(1.0e-3);
         StaticDetector::Config sd_cfg;
-        sd_cfg.gyro_std_thres = fl["static_gyro_std_thres"].as<double>(0.01);
-        sd_cfg.acc_std_thres = fl["static_acc_std_thres"].as<double>(0.15);
+        sd_cfg.gyro_std_enter_thres = fl["static_gyro_std_enter_thres"].as<double>(0.010);
+        sd_cfg.gyro_std_exit_thres = fl["static_gyro_std_exit_thres"].as<double>(0.025);
+        sd_cfg.acc_std_thres = fl["static_acc_std_thres"].as<double>(0.008);
         sd_cfg.window_sec = fl["static_window_sec"].as<double>(0.5);
         sd_cfg.park_enter_frames = fl["zupt_park_enter_frames"].as<int>(10);
         sd_cfg.park_exit_frames = fl["zupt_park_exit_frames"].as<int>(3);
@@ -86,7 +87,8 @@ bool FastLioFixedMap::Init(const std::string& yaml_path) {
         static_detector_.SetConfig(sd_cfg);
         LOG(INFO) << "FastLioFixedMap: ZUPT enabled=" << zupt_enabled_
                   << ", vel_gate=" << zupt_vel_gate_ << ", vel_cov=" << zupt_vel_cov_
-                  << ", static[gyro_std<" << sd_cfg.gyro_std_thres << ", acc_std<" << sd_cfg.acc_std_thres
+                  << ", static[gyro_std enter<" << sd_cfg.gyro_std_enter_thres << " exit>"
+                  << sd_cfg.gyro_std_exit_thres << ", acc_std<" << sd_cfg.acc_std_thres
                   << ", window=" << sd_cfg.window_sec << "s, enter=" << sd_cfg.park_enter_frames
                   << ", exit=" << sd_cfg.park_exit_frames << ", warmup=" << sd_cfg.warmup_frames << "]";
 
