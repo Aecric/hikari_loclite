@@ -47,7 +47,7 @@ system:
 reloc:
   init_max_retries: 5                   # /initialpose sticky retry 最大重试次数, 超过后放弃回 WAIT_FOR_INITIALPOSE
   init_accum_enabled: true              # MID360 初始化: /initialpose 后先原地累积 deskewed scan, 再跑 FC/NDT
-  init_accum_min_frames: 10             # 累积窗口最少帧数
+  init_accum_min_frames: 20             # 累积窗口最少帧数
   init_accum_min_points: 8000           # 累积窗口最少原始点数
   init_accum_window_sec: 2.0            # 每个 FC/NDT 尝试前至少累积的时间
   init_accum_max_wait_sec: 5.0          # 单次 /initialpose 最长等待; 超过仍未验证成功则回 WAIT
