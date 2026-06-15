@@ -3,11 +3,18 @@
 set -e
 
 LDCONFIG_FILE="/etc/ld.so.conf.d/ros-__ROS_DISTRO__-hikari-loclite.conf"
+SERVICE_UNIT="/lib/systemd/system/hikari-loclite.service"
 
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
     rm -f "$LDCONFIG_FILE"
     if command -v ldconfig >/dev/null 2>&1; then
         ldconfig
+    fi
+    if [ -f "$SERVICE_UNIT" ]; then
+        rm -f "$SERVICE_UNIT"
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload || true
+        fi
     fi
 fi
 

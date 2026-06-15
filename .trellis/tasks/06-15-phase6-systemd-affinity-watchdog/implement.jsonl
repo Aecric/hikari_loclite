@@ -1,0 +1,7 @@
+{"file": ".trellis/spec/backend/build-and-dependencies.md", "reason": "6A 绑核 helper 与 6D systemd unit/.deb 打包都受'不加新运行时依赖、独立于 lightning'约束; 富状态话题选 std_msgs 也由此界定"}
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "6B watchdog 要接入节点编排与状态机 LOST 路径; 必须按既有 ROS2 节点行为/状态转移规则改, 不污染 Fast-LIO"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "6A 新增 realtime_setup helper、6D 新增 docker2/*.service.in 的落点与模块归属"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "6A 无 cap_sys_nice 时优雅降级(warning 继续不崩)、6B 输入掉线的失败处理要符合返回值/校验约定"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "6C hot-path 日志限频直接落这份约束; 也界定 6A/6B 新增告警日志的写法"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "6B 跨回调/时间戳/TF/config: watchdog 走墙钟而非消息 stamp、富状态话题串多模块数据流, 是典型 cross-layer 改动"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "6B 复用现有 publisher/timer/PublishStatusTopics、各项新增 yaml knob 要先 rg 查既有引用避免错配"}

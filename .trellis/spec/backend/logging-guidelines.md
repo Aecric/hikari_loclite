@@ -29,6 +29,22 @@ Existing examples:
 - Use `LOG_EVERY_N(...)` or ROS2 throttled logging for repeated callbacks.
 - Keep logs deterministic and short enough for embedded devices.
 
+### Throttle macros (`include/hikari_loclite/log.h`)
+
+The local shim provides two throttles, each keyed per call site by `__LINE__`:
+
+- `LOG_EVERY_N(severity, n)` — count-based: emit once every `n` hits. Throttle
+  rate is coupled to call frequency (`n=20` at 10 Hz ≈ one line / 2 s, but
+  unbounded if the frame rate spikes).
+- `LOG_EVERY_T(severity, period_sec)` — time-based: emit at most once per
+  `period_sec` (steady monotonic clock, independent of sensor/bag timestamps;
+  concurrency-tolerant for logging). First call always passes.
+
+Prefer `LOG_EVERY_T` for **steady-state diagnostics** whose budget is expressed
+as "a few lines per second" regardless of frame rate (e.g. the per-frame
+`FastLioFixedMap diag` line uses `LOG_EVERY_T(INFO, 5.0)`). Keep anomaly/warning
+logs on `LOG_EVERY_N` (or unthrottled if rare) so they surface promptly.
+
 ## Severity
 
 - `INFO`: startup, map load summary, SC database load, successful major state

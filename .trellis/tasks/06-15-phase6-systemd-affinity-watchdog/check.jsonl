@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "验收期总检查表与禁止模式"}
+{"file": ".trellis/spec/backend/build-and-dependencies.md", "reason": "核验未引入新运行时依赖、未链 lightning.libs; 6D .service 占位符/打包接法正确"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "核验 6C 稳态日志限频达标且异常日志仍即时"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "核验 6A 无 cap 降级、6B 掉线处理的返回值/校验约定"}
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "核验 6B watchdog 未回归现有 loc_state/Marker/状态机转移"}

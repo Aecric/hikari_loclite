@@ -1,0 +1,25 @@
+[Unit]
+# hikari_loclite 固定地图 LiDAR 定位 systemd unit 模板.
+# @ROS_DISTRO@ 由 .deb postinst 在安装时渲染为实际 ROS distro (humble/jazzy...).
+# postinst 只安装本文件并 daemon-reload, **不 enable 不 start** —— 交付方按需:
+#   sudo systemctl enable --now hikari-loclite
+Description=hikari_loclite fixed-map LiDAR localization
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 默认指向 .deb 安装的配置模板; 真机部署通常改成现场标定后的 yaml (改这一行或用 drop-in override).
+Environment=HIKARI_LOCLITE_CONFIG=/opt/ros/@ROS_DISTRO@/share/hikari_loclite/config/loclite_livox.yaml
+ExecStart=/bin/bash -lc 'source /opt/ros/@ROS_DISTRO@/setup.bash && exec /opt/ros/@ROS_DISTRO@/lib/hikari_loclite/run_loclite_online --config ${HIKARI_LOCLITE_CONFIG}'
+Restart=on-failure
+RestartSec=3
+
+# 实时调度二选一 (默认都不开):
+#   A) 节点自绑核: yaml 里开 system.rt_*, 复用 .deb 授予的 cap_sys_nice (推荐, 见 loclite_livox.yaml)
+#   B) systemd 侧: 取消下面注释, 需 root 或额外授权
+# CPUAffinity=2 3
+# Nice=-10
+
+[Install]
+WantedBy=multi-user.target

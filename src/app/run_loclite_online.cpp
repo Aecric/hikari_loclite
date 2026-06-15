@@ -4,6 +4,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "system/loclite_node.hpp"
+#include "system/realtime_setup.hpp"
 
 namespace {
 
@@ -41,6 +42,10 @@ int main(int argc, char** argv) {
         rclcpp::shutdown();
         return 1;
     }
+
+    // CPU 亲和 + 实时调度: 对 spin 线程 (即本线程) 设置, 复用 .deb postinst 授予的 cap_sys_nice.
+    // 必须在 spin 前、Init 成功后做; 无权限时内部降级为 warning 继续.
+    hikari::loclite::ApplyRealtimeScheduling(node->realtime_options(), node->get_logger());
 
     RCLCPP_INFO(node->get_logger(), "hikari_loclite running");
     rclcpp::spin(node);

@@ -406,7 +406,8 @@ bool FastLioFixedMap::RunOnce(NavState* state) {
                                  << last_lidar_residual_mean_ << " > " << max_lidar_residual_mean_
                                  << ", max_sq=" << last_lidar_residual_max_;
     }
-    LOG_EVERY_N(INFO, 20) << "FastLioFixedMap diag: raw=" << last_raw_points_
+    // 稳态诊断: 时间式限频 ~每 5s 一行, 与帧率解耦, 控制嵌入式日志预算 (异常走上方 LOG_EVERY_N 警告)
+    LOG_EVERY_T(INFO, 5.0) << "FastLioFixedMap diag: raw=" << last_raw_points_
                           << ", down=" << last_down_points_
                           << ", eff=" << last_effective_surface_points_
                           << ", update_accepted=" << update_accepted

@@ -8,6 +8,8 @@ set -e
 ROS_PREFIX="/opt/ros/__ROS_DISTRO__"
 LDCONFIG_FILE="/etc/ld.so.conf.d/ros-__ROS_DISTRO__-hikari-loclite.conf"
 TARGET_BIN="$ROS_PREFIX/lib/hikari_loclite/run_loclite_online"
+SERVICE_TEMPLATE="$ROS_PREFIX/share/hikari_loclite/systemd/hikari-loclite.service.in"
+SERVICE_UNIT="/lib/systemd/system/hikari-loclite.service"
 
 write_ldconfig_conf() {
     tmp="${LDCONFIG_FILE}.tmp"
@@ -51,6 +53,20 @@ if [ "$1" = "configure" ]; then
         fi
     else
         echo "hikari_loclite: $TARGET_BIN not found, skipping setcap." >&2
+    fi
+
+    # systemd unit: 渲染模板到 /lib/systemd/system 并 daemon-reload, 但**不 enable 不 start**.
+    # 模板用 @ROS_DISTRO@ 占位 (Dockerfile 只改 __ROS_DISTRO__, 不碰它), 此处按实际 distro 渲染.
+    # 交付方按需: sudo systemctl enable --now hikari-loclite
+    if [ -f "$SERVICE_TEMPLATE" ]; then
+        if command -v systemctl >/dev/null 2>&1; then
+            ROS_DISTRO_NAME="$(basename "$ROS_PREFIX")"
+            sed "s|@ROS_DISTRO@|${ROS_DISTRO_NAME}|g" "$SERVICE_TEMPLATE" > "$SERVICE_UNIT"
+            systemctl daemon-reload || true
+            echo "hikari_loclite: installed $SERVICE_UNIT (not enabled; run 'systemctl enable --now hikari-loclite')."
+        else
+            echo "hikari_loclite: systemctl not found; skipping systemd unit install ($SERVICE_TEMPLATE)." >&2
+        fi
     fi
 fi
 

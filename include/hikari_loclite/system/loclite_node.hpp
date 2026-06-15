@@ -29,6 +29,7 @@
 #include "reloc/reloc_manager.hpp"
 #include "system/lite_pose_smoother.hpp"
 #include "system/loclite_state_machine.hpp"
+#include "system/realtime_setup.hpp"
 #include "system/stability_gate.hpp"
 
 namespace hikari::loclite {
@@ -54,6 +55,9 @@ class LocLiteNode : public rclcpp::Node {
 
     LiteLocState CurrentState() const { return state_machine_.State(); }
     const char* CurrentStateStr() const { return state_machine_.StateStr(); }
+
+    /// CPU 亲和 / 实时调度参数 (yaml system.rt_*), 供 main() 在 spin 前对 spin 线程应用
+    const RealtimeOptions& realtime_options() const { return rt_options_; }
 
    private:
     void OnImu(sensor_msgs::msg::Imu::SharedPtr msg);
@@ -81,6 +85,10 @@ class LocLiteNode : public rclcpp::Node {
     /// loc_state + ndt_status + loc_status marker
     void PublishStatusTopics(double ts);
     void PublishStatusMarker(double ts);
+    /// 输入掉线 watchdog + 富状态话题, 由 health_timer_ 周期调用 (持锁)
+    void OnHealthTimer();
+    /// /hikari_loc/status: [state, ndt_conf, imu_age_s, lidar_age_s, fps, in_map] (持锁)
+    void PublishRichStatus(double now_wall, double imu_age, double lidar_age);
     /// 发布降采样后的全局 PCD 地图到 /pcdmap (transient_local, 供 RViz 定位验证)
     void PublishPcdMap();
     /// lidar_frame → level_frame 重力对齐 TF (每条 IMU 后调用, 持锁)
@@ -112,6 +120,15 @@ class LocLiteNode : public rclcpp::Node {
     bool publish_pcdmap_ = false;  // runtime.publish_pcdmap: /pcdmap 原始 PCD 降采样地图
     static constexpr size_t kMaxPathPoses = 5000;
 
+    // --- 输入掉线 watchdog + 富状态上报 (runtime.*) ---
+    bool watchdog_enabled_ = true;       // runtime.watchdog_enabled: IMU/Lidar 掉线检测
+    double imu_timeout_sec_ = 1.0;       // runtime.imu_timeout_sec: IMU 静默超此值视为掉线
+    double lidar_timeout_sec_ = 2.0;     // runtime.lidar_timeout_sec: Lidar 静默超此值视为掉线
+    bool status_topic_enabled_ = true;   // runtime.status_topic_enabled: 发布 /hikari_loc/status 富状态
+
+    // --- CPU 亲和 / 实时调度 (system.rt_*), 在 Init 中解析, 由 main() spin 前应用 ---
+    RealtimeOptions rt_options_;
+
     // --- 运行时状态 (mutex_ 保护) ---
     std::mutex mutex_;
     bool lio_has_output_ = false;       // LIO 是否产出过至少一帧 (即"LIO 就绪")
@@ -134,6 +151,12 @@ class LocLiteNode : public rclcpp::Node {
     double last_level_tf_ts_ = -1.0;      // 上次 level TF 的状态时间戳, 防止 IMU 速率下重复广播同一 stamp
     double last_sc_attempt_ts_ = -1.0;    // SC 重定位尝试节流 (cooldown)
     SE3 marker_pose_;                     // loc_status marker 的悬浮位置 (最近一次有意义的位姿)
+    // watchdog 时戳全部用 node clock (this->now()): 真机=墙钟, sim/bag=sim 钟, 自洽且不与 scan ts 跨域比较
+    double last_imu_wall_ts_ = -1.0;      // 最近一条 IMU 到达时刻
+    double last_lidar_wall_ts_ = -1.0;    // 最近一帧 Lidar (Livox/PointCloud2) 到达时刻
+    double input_stale_since_wall_ = -1.0;  // 输入掉线起始时刻 (-1 = 未掉线), 用于告警持续时长
+    double last_frame_wall_ts_ = -1.0;    // 上一帧 LIO 产出时刻, 算 fps
+    double frame_fps_ = 0.0;              // LIO 输出帧率 EWMA
 
     // --- 组件 ---
     FastLioFixedMap::Ptr lio_;
@@ -160,10 +183,12 @@ class LocLiteNode : public rclcpp::Node {
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr sc_candidates_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr sc_init_guess_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr sc_gravity_check_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr status_pub_;  // /hikari_loc/status 富状态
     std::shared_ptr<tf2_ros::TransformBroadcaster> tf_pub_;
 
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr sc_reloc_service_;
     rclcpp::TimerBase::SharedPtr wait_state_timer_;  // WAIT_FOR_INITIALPOSE 下 1Hz 持续上报
+    rclcpp::TimerBase::SharedPtr health_timer_;      // 输入掉线 watchdog + 富状态上报 (~5Hz)
 
     nav_msgs::msg::Path path_msg_;
 };

@@ -208,3 +208,31 @@ python3 -c "from pathlib import Path; import re; path=Path('package.xml'); text=
 bloom-generate rosdebian --os-name ubuntu --os-version "$UBUNTU_CODENAME" --ros-distro "$ROS_DISTRO"
 python3 docker2/inject_control_dep.py debian/control "ros-${ROS_DISTRO}-livox-ros-driver2"
 ```
+
+### 8. Placeholders in maintainer-script-rendered files
+
+The Dockerfile renders maintainer scripts by **globally** rewriting the literal
+token `__ROS_DISTRO__` in `debian/postinst` / `debian/postrm`
+(`sed -i "s|__ROS_DISTRO__|${ROS_DISTRO}|g"`). Any file whose contents the
+maintainer script itself renders **at install time on the target** must NOT reuse
+`__ROS_DISTRO__` as its placeholder — the build-time global sed would rewrite the
+inner `sed` pattern too, breaking the runtime substitution.
+
+> **Gotcha**: A package-payload file (installed to `share/`, then templated by
+> postinst) needs a distinct placeholder. Use `@ROS_DISTRO@`. The postinst
+> derives the real distro from the already-rendered prefix and substitutes it:
+>
+> ```sh
+> ROS_DISTRO_NAME="$(basename "$ROS_PREFIX")"   # ROS_PREFIX=/opt/ros/<distro>
+> sed "s|@ROS_DISTRO@|${ROS_DISTRO_NAME}|g" "$TEMPLATE" > "$TARGET"
+> ```
+
+Wrong: `hikari-loclite.service.in` uses `__ROS_DISTRO__` → Dockerfile rewrites it
+at build time, and postinst's render no-ops.
+
+Correct: `docker2/hikari-loclite.service.in` uses `@ROS_DISTRO@`; CMake installs
+it to `share/${PROJECT_NAME}/systemd/`; postinst renders it to
+`/lib/systemd/system/` with `daemon-reload` but **does not enable or start** it
+(operator runs `systemctl enable --now hikari-loclite`). The `[Install]` section
+stays in the template so manual enable works later. `postrm` removes the unit on
+remove/purge.

@@ -55,6 +55,7 @@ add_library(${PROJECT_NAME}_core SHARED
   src/ndt/voxel_grid_covariance_omp.cpp
   src/ndt/ndt_corrector.cpp
   src/reloc/reloc_manager.cpp
+  src/system/realtime_setup.cpp
   src/system/loclite_node.cpp
 )
 
@@ -130,6 +131,12 @@ install(TARGETS
 
 install(DIRECTORY config launch
   DESTINATION share/${PROJECT_NAME}
+)
+
+# systemd unit 模板 (Phase6 产品化): .deb postinst 在安装时渲染 @ROS_DISTRO@ 并装到
+# /lib/systemd/system, 不 enable 不 start. 开发 colcon 构建不自动接 systemd.
+install(FILES docker2/hikari-loclite.service.in
+  DESTINATION share/${PROJECT_NAME}/systemd
 )
 
 ament_package()

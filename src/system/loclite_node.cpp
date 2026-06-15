@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace hikari::loclite {
@@ -99,6 +100,15 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
             T_lidar_base_ = T_base_lidar.inverse();
             RCLCPP_INFO(this->get_logger(), "base->lidar extrinsic: t=[%.3f, %.3f, %.3f], rpy=[%.3f, %.3f, %.3f]",
                         bx, by, bz, br, bp, byw);
+
+            // CPU 亲和 / 实时调度 (在 main() spin 前应用; 需 cap_sys_nice, 无权限降级继续)
+            rt_options_.enabled = sys["rt_enabled"].as<bool>(false);
+            rt_options_.cpu_cores.clear();
+            if (sys["rt_cpu_cores"]) {
+                rt_options_.cpu_cores = sys["rt_cpu_cores"].as<std::vector<int>>(std::vector<int>{});
+            }
+            rt_options_.sched_fifo = sys["rt_sched_fifo"].as<bool>(false);
+            rt_options_.priority = sys["rt_priority"].as<int>(80);
         }
         if (yaml["fast_lio"]) {
             lidar_type = yaml["fast_lio"]["lidar_type"].as<int>(1);
@@ -119,6 +129,10 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
             publish_odom_ = rt["publish_odom"].as<bool>(true);
             publish_path_ = rt["publish_path"].as<bool>(true);
             publish_pcdmap_ = rt["publish_pcdmap"].as<bool>(false);
+            watchdog_enabled_ = rt["watchdog_enabled"].as<bool>(true);
+            imu_timeout_sec_ = rt["imu_timeout_sec"].as<double>(1.0);
+            lidar_timeout_sec_ = rt["lidar_timeout_sec"].as<double>(2.0);
+            status_topic_enabled_ = rt["status_topic_enabled"].as<bool>(true);
         }
         if (yaml["ndt"]) {
             ndt_good_rate_hz_ = yaml["ndt"]["good_rate_hz"].as<double>(1.0);
@@ -268,6 +282,7 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
     sc_candidates_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>("hikari_loc/sc/candidates", 1);
     sc_init_guess_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("hikari_loc/sc/init_guess", 1);
     sc_gravity_check_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>("hikari_loc/sc/gravity_check", 1);
+    status_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>("hikari_loc/status", 10);
 
     tf_pub_ = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
 
@@ -363,6 +378,17 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
         PublishStatusTopics(this->now().seconds());
     });
 
+    // 输入掉线 watchdog + 富状态上报: ~5Hz 独立 wall timer (掉线时帧路径不跑, 仍需周期检查/上报)
+    if (watchdog_enabled_ || status_topic_enabled_) {
+        health_timer_ = create_wall_timer(std::chrono::milliseconds(200), [this] { OnHealthTimer(); });
+    }
+    RCLCPP_INFO(this->get_logger(),
+                "Watchdog: enabled=%d, imu_timeout=%.2fs, lidar_timeout=%.2fs, status_topic=%d; "
+                "RT: enabled=%d, sched_fifo=%d, prio=%d, cores=%zu",
+                watchdog_enabled_ ? 1 : 0, imu_timeout_sec_, lidar_timeout_sec_,
+                status_topic_enabled_ ? 1 : 0, rt_options_.enabled ? 1 : 0,
+                rt_options_.sched_fifo ? 1 : 0, rt_options_.priority, rt_options_.cpu_cores.size());
+
     RCLCPP_INFO(this->get_logger(), "hikari_loclite initialized successfully (imu=%s, lidar_type=%d)",
                 imu_topic.c_str(), lidar_type);
     return true;
@@ -374,6 +400,7 @@ void LocLiteNode::Shutdown() {
 
 void LocLiteNode::OnImu(sensor_msgs::msg::Imu::SharedPtr msg) {
     std::lock_guard<std::mutex> lk(mutex_);
+    last_imu_wall_ts_ = this->now().seconds();  // watchdog: IMU 到达时刻 (node clock)
     lio_->AddImu(msg);
 
     // 每条 IMU 处理后用 LIO 最新状态更新重力对齐滤波器并发布 lidar_frame → level_frame TF
@@ -385,6 +412,7 @@ void LocLiteNode::OnImu(sensor_msgs::msg::Imu::SharedPtr msg) {
 void LocLiteNode::OnLivox(livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
     {
         std::lock_guard<std::mutex> lk(mutex_);
+        last_lidar_wall_ts_ = this->now().seconds();  // watchdog: Lidar 到达时刻 (node clock)
         lio_->AddLivox(msg);
     }
     ProcessFrame();
@@ -393,6 +421,7 @@ void LocLiteNode::OnLivox(livox_ros_driver2::msg::CustomMsg::SharedPtr msg) {
 void LocLiteNode::OnCloud(sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     {
         std::lock_guard<std::mutex> lk(mutex_);
+        last_lidar_wall_ts_ = this->now().seconds();  // watchdog: Lidar 到达时刻 (node clock)
         lio_->AddCloud(msg);
     }
     ProcessFrame();
@@ -454,6 +483,14 @@ void LocLiteNode::ProcessFrame() {
         return;
     }
     lio_has_output_ = true;
+
+    // LIO 输出帧率 EWMA (node clock, 供 /hikari_loc/status); 只在真正产出一帧时更新
+    const double frame_wall = this->now().seconds();
+    if (last_frame_wall_ts_ > 0.0 && frame_wall > last_frame_wall_ts_) {
+        const double inst_fps = 1.0 / (frame_wall - last_frame_wall_ts_);
+        frame_fps_ = frame_fps_ <= 0.0 ? inst_fps : 0.8 * frame_fps_ + 0.2 * inst_fps;
+    }
+    last_frame_wall_ts_ = frame_wall;
 
     const double ts = state.timestamp_;
     const CloudPtr scan = lio_->LatestDeskewedCloud();
@@ -925,6 +962,77 @@ void LocLiteNode::PublishStatusMarker(double ts) {
     }
     marker.color.a = 1.0;
     loc_status_marker_pub_->publish(marker);
+}
+
+void LocLiteNode::OnHealthTimer() {
+    std::lock_guard<std::mutex> lk(mutex_);
+
+    const double now_wall = this->now().seconds();
+    const double imu_age =
+        last_imu_wall_ts_ < 0.0 ? std::numeric_limits<double>::infinity() : now_wall - last_imu_wall_ts_;
+    const double lidar_age =
+        last_lidar_wall_ts_ < 0.0 ? std::numeric_limits<double>::infinity() : now_wall - last_lidar_wall_ts_;
+
+    // 输入掉线检测: 仅在 LIO 已产出且处于"应有数据流"的活跃态时判定
+    // (WAIT/Uninitialized 本就没数据流, 不该误报). 掉线 → 告警 + 置 LOST, 不 reset Fast-LIO 状态.
+    if (watchdog_enabled_ && lio_has_output_) {
+        const auto st = state_machine_.State();
+        const bool active = st == LiteLocState::Good || st == LiteLocState::Degraded ||
+                            st == LiteLocState::Initializing || st == LiteLocState::Lost;
+        if (active) {
+            const bool stale = imu_age > imu_timeout_sec_ || lidar_age > lidar_timeout_sec_;
+            if (stale) {
+                if (input_stale_since_wall_ < 0.0) {
+                    input_stale_since_wall_ = now_wall;
+                }
+                RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 1000,
+                    "input dropout: imu_age=%.2fs (>%.2f) lidar_age=%.2fs (>%.2f), stale for %.1fs",
+                    imu_age, imu_timeout_sec_, lidar_age, lidar_timeout_sec_,
+                    now_wall - input_stale_since_wall_);
+                if (st != LiteLocState::Lost) {
+                    state_machine_.SetLost("input_timeout");
+                    lost_enter_ts_ = -1.0;  // 重置, 输入恢复后由 ProcessFrame 的 Lost 分支按 scan ts 重新计时
+                    if (reloc_->AutoOnLost() && reloc_->ScEnabled()) {
+                        reloc_->Arm("input_timeout", now_wall);
+                    }
+                    RCLCPP_ERROR(this->get_logger(),
+                                 "input dropout (imu_age=%.2fs, lidar_age=%.2fs) -> LOST", imu_age,
+                                 lidar_age);
+                }
+            } else if (input_stale_since_wall_ >= 0.0) {
+                RCLCPP_INFO(this->get_logger(), "input recovered (imu_age=%.2fs, lidar_age=%.2fs)",
+                            imu_age, lidar_age);
+                input_stale_since_wall_ = -1.0;
+            }
+        }
+    }
+
+    if (status_topic_enabled_) {
+        PublishRichStatus(now_wall, imu_age, lidar_age);
+    }
+}
+
+void LocLiteNode::PublishRichStatus(double /*now_wall*/, double imu_age, double lidar_age) {
+    const auto st = state_machine_.State();
+    // in_map: 当前是否在固定图内被可信定位 (Good/Degraded). 非 Good/Degraded 时无可信位姿.
+    const bool in_map = st == LiteLocState::Good || st == LiteLocState::Degraded;
+
+    std_msgs::msg::Float32MultiArray msg;
+    msg.layout.dim.resize(1);
+    msg.layout.dim[0].label = "state;ndt_conf;imu_age_s;lidar_age_s;fps;in_map";
+    msg.layout.dim[0].size = 6;
+    msg.layout.dim[0].stride = 6;
+    // age 为 inf 时上报 -1 (下游易判: 负值=尚无该输入或已长时间掉线)
+    const float imu_age_f = std::isfinite(imu_age) ? static_cast<float>(imu_age) : -1.0f;
+    const float lidar_age_f = std::isfinite(lidar_age) ? static_cast<float>(lidar_age) : -1.0f;
+    msg.data = {static_cast<float>(static_cast<int>(st)),
+                static_cast<float>(last_ndt_confidence_),
+                imu_age_f,
+                lidar_age_f,
+                static_cast<float>(frame_fps_),
+                in_map ? 1.0f : 0.0f};
+    status_pub_->publish(msg);
 }
 
 void LocLiteNode::PublishPcdMap() {

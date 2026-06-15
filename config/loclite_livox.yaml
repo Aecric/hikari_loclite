@@ -21,6 +21,14 @@ system:
   lost_timeout_sec: 5.0                 # Lost 持续超过该时长才转 WAIT_FOR_INITIALPOSE
   level_frame_cutoff_freq: 0.5          # 重力对齐低通滤波截止频率 (Hz)
 
+  # ==== CPU 亲和 / 实时调度 (Phase6 产品化) ====
+  # 在 main() spin 前对 spin 线程应用; 需 cap_sys_nice (由 .deb postinst setcap 授予).
+  # 无权限时降级为普通调度并打印 warning, 不影响功能 —— 开发机 / bag 回放保持 rt_enabled=false 即可.
+  rt_enabled: false                     # 总开关; 嵌入式产线再开
+  rt_cpu_cores: []                      # 绑定的 CPU 核, 如 [2, 3]; 空 = 不绑核
+  rt_sched_fifo: false                  # 是否切 SCHED_FIFO 实时调度
+  rt_priority: 80                       # SCHED_FIFO 优先级 (越界自动 clamp 到内核区间)
+
   # ==== 稳定门控 (轻量版 lightning StabilityGate, 阈值默认照 lightning default_livox.yaml:131-137) ====
   # /initialpose 经 NDT 验证通过后先停在 Initializing (TF/odom 照发, 照 lightning 方案 B),
   # 滑窗内位姿抖动持续低于阈值且窗口覆盖 >= window_sec 才放行 Good.
@@ -83,6 +91,14 @@ runtime:
   publish_odom: true                    # hikari_loc/odom
   publish_path: true                    # hikari_loc/path (0.1s 节流, 上限 5000; 契约接口默认开启)
   publish_pcdmap: true                 # 是否发布 /pcdmap: 原始 global.pcd 按 fixed_map.voxel_leaf 降采样后发布到 map frame, 供定位匹配验证
+
+  # ==== 输入掉线 watchdog + 富状态上报 (Phase6 产品化) ====
+  # 独立 ~5Hz timer: 检测 IMU/Lidar 静默 (node clock 域, 不与 scan ts 跨域比较).
+  # 掉线 → 告警 + 置 LOST (不 reset Fast-LIO); 输入恢复后走正常 Lost 恢复路径.
+  watchdog_enabled: true                # IMU/Lidar 掉线检测
+  imu_timeout_sec: 1.0                  # IMU 静默超此值视为掉线 (200Hz 下 1s≈200 帧丢失, 明确异常)
+  lidar_timeout_sec: 2.0               # Lidar 静默超此值视为掉线 (10Hz)
+  status_topic_enabled: true            # 发布 /hikari_loc/status: [state, ndt_conf, imu_age_s, lidar_age_s, fps, in_map]
 
 fixed_map:
   global_pcd: "/root/slam_ws/data/new_map/global.pcd"
