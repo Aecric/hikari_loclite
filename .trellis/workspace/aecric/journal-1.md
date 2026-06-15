@@ -141,3 +141,36 @@ Phase6 产品化运行时优先三项+薄 systemd unit: CPU亲和/SCHED_FIFO(rea
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: Write bilingual project README
+
+**Date**: 2026-06-15
+**Task**: Write bilingual project README
+**Branch**: `master`
+
+### Summary
+
+Added a bilingual Chinese/English README covering project overview, build/run commands, ROS interfaces, map configuration, offline evaluation, and deb deployment.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `8e9860b` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
