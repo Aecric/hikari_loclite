@@ -294,4 +294,26 @@ bool ESKF::Update(ESKF::ObsType obs, const double& R) {
     return true;
 }
 
+bool ESKF::ZuptUpdate(double vel_cov) {
+    // 速度子块零速伪观测: 标准单步线性 EKF 更新.
+    //   观测 z = 0, 观测函数 h(x) = vel_, 残差 r = z - h(x) = -vel_;
+    //   观测雅可比 H 仅在列 [kVelIdx:kVelIdx+3] 为单位阵 (选速度 3 行).
+    // ZUPT 校正量极小, boxplus 足够正确处理 rot 的 SO3 流形, 无需迭代/SO3 retraction.
+    const int vi = NavState::kVelIdx;  // 6
+
+    Mat3d S = P_.block<3, 3>(vi, vi) + vel_cov * Mat3d::Identity();
+    Eigen::Matrix<double, state_dim_, 3> K = P_.block<state_dim_, 3>(0, vi) * S.inverse();
+
+    Vec3d r = -x_.GetVel();
+    StateVecType dx = K * r;  // 12x1
+    x_ = x_.boxplus(dx);      // boxplus 已正确处理 rot 的 SO3
+
+    CovType KH = CovType::Zero();
+    KH.block<state_dim_, 3>(0, vi) = K;  // K*H, H 只选 vel 列
+    P_ = (CovType::Identity() - KH) * P_;
+
+    SymmetrizeAndFloorCovariance(P_, options_.min_cov_diag_);
+    return true;
+}
+
 }  // namespace hikari::loclite

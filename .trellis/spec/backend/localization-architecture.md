@@ -113,6 +113,54 @@ lightning's cascaded 5→2→0.5 multi-scale NDT — embedded budget is `threads
 and cascade triples NDT cost. Escalate to cascade only if a future map proves
 single-stage TP cannot separate true from false matches.
 
+## ZUPT Role (Zero-Velocity Update)
+
+ZUPT damps static drift. It is **orthogonal to NDT, not a substitute** — keep both.
+
+- **Symptom it fixes** (user 2026-06-15, zt_5201 corridor): when truly static, the
+  platform creeps along the corridor axis. IMU residual bias + gravity-alignment
+  error leak a small nonzero `vel_` that integrates into position; the sparse fixed
+  map cannot pin the along-axis position (eff points collapse in the corridor).
+- **Why NDT cannot fix it**: NDT is degenerate along the **same** corridor axis (the
+  Phase-2 rotation/translation degeneracy direction). Raising `ndt.good_rate_hz` /
+  lowering `ndt.gain_good` does not touch the along-axis creep — that geometry is
+  unobservable. ZUPT uses the zero-velocity **motion model** instead of geometry, so
+  it works exactly where geometry is degenerate.
+- **Implementation contract**:
+  - `ESKF::ZuptUpdate(vel_cov)` is a **separate single-step linear EKF update** on the
+    velocity subblock `[kVelIdx : kVelIdx+3]` (z=0, r=−vel, H selects the 3 vel rows,
+    `S = P[vel,vel] + vel_cov·I`, `P = (I−KH)P`, then symmetrize/floor). It must **not**
+    be folded into the iterated `Update()`, which is hardwired to the 6-dim pose
+    observation (`HTH_` at block(0,0) with SO3 retraction). The ZUPT correction is tiny,
+    so `boxplus` alone handles the rot SO3 term — no retraction loop needed.
+  - Trigger is a **double gate**: `StaticDetector.IsStatic() && |EKF vel| <
+    fast_lio.zupt_vel_gate`. The velocity gate is the cheap first闸; static detection is
+    the second. Both are required so real slow motion is never clamped.
+  - Run ZUPT **after** the lidar update (lidar pins pose → ZUPT pins velocity), before
+    publishing `state_point_`. Reset the detector on every `ResetToMapPose()` (a
+    velocity/pose-domain break would corrupt the static window).
+  - `StaticDetector` (header-only, `lio/static_detector.h`) **must stay logic-identical
+    to `scripts/zupt_calib/zupt_detector_sim.py`**: per-IMU-sample time-window std of
+    gyro-norm/acc-norm (population std, ddof=0), double threshold, asymmetric hysteresis
+    (enter slow `park_enter_frames`, exit fast `park_exit_frames`), warmup. Counters are
+    in **IMU-sample units** in both, so a calibration found with the python node
+    transfers 1:1 into yaml.
+- **Calibration workflow**: `scripts/zupt_calib/imu_static_stats.py` (run static → noise
+  floor → `static_gyro_std_thres` / `static_acc_std_thres`), then `zupt_detector_sim.py`
+  (standing↔slow-walk → validate hysteresis, set `zupt_park_enter/exit_frames`). The yaml
+  defaults are placeholders pending per-rig calibration.
+- **Do NOT add lightning's `parking_freeze`** (whole-ESEKF freeze). hikari freezes
+  `ba`/`grav`, so a full freeze yields little benefit and risks clamping real motion;
+  velocity-only ZUPT is the deliberate scope.
+
+### Design Decision: velocity-only ZUPT, separate from the iterated pose update
+
+**Wrong**: shoehorn a velocity observation into the 6-dim iterated `Update()` — it is
+structured around the pose `HTH` block + SO3 retraction and a custom obs-function dispatch.
+
+**Correct**: a dedicated 3-dim linear update on the vel subblock. Because the correction
+is sub-millimetre-per-step, `boxplus` is sufficient and no SO3 retraction is needed.
+
 ## Scan Context Role
 
 Scan Context is for initialization and LOST recovery. It must not become a

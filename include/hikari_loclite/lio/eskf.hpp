@@ -77,6 +77,12 @@ class ESKF {
     void Predict(const double& dt, const ProcessNoiseType& Q, const Vec3d& gyro, const Vec3d& acce);
     bool Update(ObsType obs, const double& R);
 
+    /// ZUPT 零速更新: 对速度子块做单步线性 EKF 零速伪观测 (z=0, h(x)=vel_, r=-vel_,
+    /// H 在列 [kVelIdx:kVelIdx+3] 为单位阵). 走廊沿轴几何退化处用运动模型钳死蠕动,
+    /// 与几何观测 (LIDAR/NDT) 正交. ba/grav 已冻结, 故不做整滤波器冻结.
+    /// vel_cov: 零速伪观测噪声 (越小钳得越硬).
+    bool ZuptUpdate(double vel_cov);
+
     const NavState& GetX() const { return x_; }
     const CovType& GetP() const { return P_; }
     const double& GetStamp() const { return stamp_; }

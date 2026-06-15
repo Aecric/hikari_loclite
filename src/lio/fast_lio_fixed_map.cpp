@@ -71,6 +71,25 @@ bool FastLioFixedMap::Init(const std::string& yaml_path) {
         max_lidar_residual_mean_ = yaml["fast_lio"]["max_lidar_residual_mean"].as<double>(0.05);
         voxel_scan_.setLeafSize(filter_size_scan, filter_size_scan, filter_size_scan);
 
+        // ZUPT 零速更新 (Phase 1): 默认值用 Phase 0 标定结果, 缺键走默认.
+        auto fl = yaml["fast_lio"];
+        zupt_enabled_ = fl["zupt_enabled"].as<bool>(true);
+        zupt_vel_gate_ = fl["zupt_vel_gate"].as<double>(0.05);
+        zupt_vel_cov_ = fl["zupt_vel_cov"].as<double>(1.0e-3);
+        StaticDetector::Config sd_cfg;
+        sd_cfg.gyro_std_thres = fl["static_gyro_std_thres"].as<double>(0.01);
+        sd_cfg.acc_std_thres = fl["static_acc_std_thres"].as<double>(0.15);
+        sd_cfg.window_sec = fl["static_window_sec"].as<double>(0.5);
+        sd_cfg.park_enter_frames = fl["zupt_park_enter_frames"].as<int>(10);
+        sd_cfg.park_exit_frames = fl["zupt_park_exit_frames"].as<int>(3);
+        sd_cfg.warmup_frames = fl["zupt_warmup_frames"].as<int>(50);
+        static_detector_.SetConfig(sd_cfg);
+        LOG(INFO) << "FastLioFixedMap: ZUPT enabled=" << zupt_enabled_
+                  << ", vel_gate=" << zupt_vel_gate_ << ", vel_cov=" << zupt_vel_cov_
+                  << ", static[gyro_std<" << sd_cfg.gyro_std_thres << ", acc_std<" << sd_cfg.acc_std_thres
+                  << ", window=" << sd_cfg.window_sec << "s, enter=" << sd_cfg.park_enter_frames
+                  << ", exit=" << sd_cfg.park_exit_frames << ", warmup=" << sd_cfg.warmup_frames << "]";
+
         // Fixed map config
         crop_radius_m_ = yaml["fixed_map"]["crop_radius_m"].as<double>(30.0);
         max_points_ = yaml["fixed_map"]["max_points"].as<int>(800000);
@@ -216,6 +235,9 @@ bool FastLioFixedMap::ResetToMapPose(const SE3& T_map_lidar, bool reset_velocity
     // Rebuild local map around new pose
     RebuildLocalMapAround(T_map_lidar);
     tracking_enabled_ = true;
+
+    // 速度/位姿域中断: 清空静止检测窗与迟滞计数, 重定位后从干净状态重新判定泊车态.
+    static_detector_.Reset();
 
     // Do not reset the IMU processor here. ResetToMapPose is called after a
     // deskewed scan has already proven the candidate pose; forcing IMU init
@@ -395,8 +417,24 @@ bool FastLioFixedMap::RunOnce(NavState* state) {
                           << ", pose=[" << ImuPoseToLidarPose(kf_.GetX().GetPose()).translation().transpose()
                           << "]";
 
+    // ==== ZUPT 零速更新 ====
+    // 走廊沿轴几何不可观, NDT 在该方向同样退化拉不回; ZUPT 用零速运动模型钳死蠕动, 与几何观测正交.
+    // 双门触发: StaticDetector.is_static (滑窗 IMU std + 非对称迟滞) && EKF 速度模 < zupt_vel_gate_.
+    bool is_static = false;
+    if (zupt_enabled_ && flg_EKF_inited_) {
+        for (const auto& imu : measures_.imu_) {
+            if (imu) static_detector_.AddImu(*imu);
+        }
+        is_static = static_detector_.IsStatic();
+        if (is_static && kf_.GetX().GetVel().norm() < zupt_vel_gate_) {
+            kf_.ZuptUpdate(zupt_vel_cov_);
+            LOG_EVERY_N(INFO, 20) << "ZUPT applied, |v|=" << kf_.GetX().GetVel().norm();
+        }
+    }
+
     state_point_ = kf_.GetX();
     state_point_.timestamp_ = measures_.lidar_end_time_;
+    state_point_.is_parking_ = is_static;
 
     *state = state_point_;
     return true;

@@ -117,6 +117,19 @@ fast_lio:
   esti_plane_threshold: 0.1
   max_lidar_residual_mean: 0.05       # LIO 点面残差 median(res^2) 上限; 超过视为坏匹配并进入 Degraded/Lost
 
+  # ==== ZUPT 零速更新 (Phase 1, 治走廊静止沿轴蠕动; NDT 在退化方向无效, 与 NDT 正交) ====
+  # 触发: StaticDetector.is_static (滑窗 IMU std + 非对称迟滞) && EKF 速度模 < zupt_vel_gate.
+  # 静止/迟滞参数需用 scripts/zupt_calib/{imu_static_stats,zupt_detector_sim}.py 现场标定后回填.
+  zupt_enabled: true
+  zupt_vel_gate: 0.05            # m/s, EKF 速度模 < 此才允许 ZUPT (第一道闸)
+  zupt_vel_cov: 1.0e-3          # 零速伪观测噪声 (越小钳得越硬)
+  static_gyro_std_thres: 0.01   # rad/s, gyro 模 std 静止阈值 [待 imu_static_stats.py 标定]
+  static_acc_std_thres: 0.15    # m/s^2, acc 模 std 静止阈值 [待 imu_static_stats.py 标定]
+  static_window_sec: 0.5        # 静止检测滑窗 (秒), 与标定时一致
+  zupt_park_enter_frames: 10    # 连续静止多少 IMU 样本才进泊车 (进慢) [zupt_detector_sim.py 标定]
+  zupt_park_exit_frames: 3      # 连续运动多少 IMU 样本才出泊车 (出快) [同上]
+  zupt_warmup_frames: 50        # 启动丢弃 IMU 样本数
+
 roi:
   height_max: 3.0
   height_min: -1.0

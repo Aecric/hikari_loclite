@@ -20,6 +20,7 @@
 #include "lio/eskf.hpp"
 #include "lio/imu_processing.hpp"
 #include "lio/pointcloud_preprocess.h"
+#include "lio/static_detector.h"
 
 namespace hikari::loclite {
 
@@ -73,6 +74,12 @@ class FastLioFixedMap {
     ESKF kf_;
     std::shared_ptr<PointCloudPreprocess> preprocess_;
     std::shared_ptr<ImuProcess> p_imu_;
+
+    // ZUPT 零速更新 (Phase 1, 治走廊静止沿轴蠕动; 与 NDT 正交)
+    StaticDetector static_detector_;
+    bool zupt_enabled_ = true;
+    double zupt_vel_gate_ = 0.05;    // m/s, EKF 速度模 < 此才允许 ZUPT (第一道闸)
+    double zupt_vel_cov_ = 1.0e-3;   // 零速伪观测噪声 (越小钳得越硬)
 
     // iVox options
     IVoxType::Options ivox_options_;
