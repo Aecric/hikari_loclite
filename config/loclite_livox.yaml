@@ -56,11 +56,11 @@ reloc:
   # ==== SC 重定位 (Phase 5) ====
   sc_enabled: true                      # 是否启用 Scan Context 重定位
   auto_on_init: true                    # 冷启动时自动尝试 SC (不依赖 /initialpose)
-  auto_on_lost: true                    # LOST 态自动 arm SC 恢复
+  auto_on_lost: false                    # LOST 态自动 arm SC 恢复
   disable_after_good: true              # Good 态 disarm SC, 不消耗 CPU
   sc_top_k: 5                           # SC QueryTopK 候选数 (原 1; 多候选 + 重力检查 + NDT 验证逐个过滤)
-  sc_cooldown_sec: 5.0                  # SC 尝试冷却时间 (秒)
-  max_runtime_sec: 10.0                 # SC 重定位最大运行时间 (秒)
+  sc_cooldown_sec: 3.0                  # SC 尝试冷却时间 (秒)
+  max_runtime_sec: 20.0                 # SC 重定位最大运行时间 (秒)
   sc_database: ""                       # SC 数据库路径; 为空时自动从 map_path/sc_database.bin 加载
   poses_txt: ""                         # 关键帧位姿路径; 为空时自动从 map_path/poses.txt 加载
   gravity_roll_thres_deg: 30.0          # SC 候选重力 roll 一致性阈值 (度)
