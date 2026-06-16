@@ -79,6 +79,8 @@ class LocLiteNode : public rclcpp::Node {
     void TryScRelocalize(const CloudPtr& scan, double ts, bool manual = false);
     /// 发布 SC 调试话题 (仅在有订阅者时发布)
     void PublishScDebugTopics();
+    /// 发布 KISS query(level) 累积云到 sc/accum_cloud (复用 SC 话题, 仅在有订阅者时发布)
+    void PublishKissAccumCloud();
 
     /// odom + TF(map→base_link) + path
     void PublishPose(const NavState& state);

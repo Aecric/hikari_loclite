@@ -200,10 +200,21 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
         return false;
     }
 
-    // Init RelocManager (SC pipeline)
+    // Init RelocManager (KISS / SC pipeline, backend selected by reloc.reloc_backend)
     if (!reloc_->Init(config_path_, map_dir)) {
         RCLCPP_ERROR(this->get_logger(), "Failed to init RelocManager");
         return false;
+    }
+    // backend=kiss: 固定图就绪后注入 KISS target (整图预降采样缓存; 小图无需 crop).
+    if (reloc_->BackendIsKiss()) {
+        reloc_->SetKissTarget(lio_->FixedMapCloud());
+        if (reloc_->KissTargetReady()) {
+            RCLCPP_INFO(this->get_logger(), "KISS reloc backend: target injected from fixed map");
+        } else {
+            RCLCPP_WARN(this->get_logger(),
+                        "KISS reloc backend: target NOT ready after injection "
+                        "(map too large / empty / KISS not built); reloc will be unavailable");
+        }
     }
 
     // 稳定门控: /initialpose 验证通过后先 Initializing, 滑窗收敛 (或高 TP 提前) 才放行 Good
@@ -236,12 +247,13 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
     RCLCPP_INFO(this->get_logger(), "GravityAlignmentFilter: cutoff_freq=%.2f Hz, lidar_frame=%s, level_frame=%s",
                 level_cutoff, lidar_frame_id_.c_str(), level_frame_id_.c_str());
 
-    // 初始状态: 等待外部 /initialpose 或 SC 自动重定位
+    // 初始状态: 等待外部 /initialpose 或自动重定位 (KISS/SC, 按 backend)
     state_machine_.SetWaitForInitialPose("startup");
-    // SC auto-on-init: arm reloc so first ProcessFrame can attempt SC
-    if (reloc_->AutoOnInit() && reloc_->ScEnabled()) {
+    // auto-on-init: arm reloc so first ProcessFrame can attempt relocalization
+    if (reloc_->AutoOnInit() && reloc_->RelocReady()) {
         reloc_->Arm("auto_on_init", this->now().seconds());
-        RCLCPP_INFO(this->get_logger(), "SC auto_on_init: armed for first scan");
+        RCLCPP_INFO(this->get_logger(), "reloc auto_on_init: armed for first scan (backend=%s)",
+                    reloc_->BackendIsKiss() ? "kiss" : "sc");
     }
 
     // Subscribers
@@ -286,16 +298,19 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
 
     tf_pub_ = std::make_shared<tf2_ros::TransformBroadcaster>(*this);
 
-    // 手动 SC 重定位服务 (bypass blackout, 用户显式触发即视为授权抢注)
+    // 手动重定位服务 (bypass blackout, 用户显式触发即视为授权抢注).
+    // 服务名保留 hikari_loc/sc_reloc 兼容下游; 内部按 backend 分派 KISS / SC.
     sc_reloc_service_ = create_service<std_srvs::srv::Trigger>(
         "hikari_loc/sc_reloc",
         [this](const std_srvs::srv::Trigger::Request::SharedPtr,
                std_srvs::srv::Trigger::Response::SharedPtr response) {
-            RCLCPP_INFO(this->get_logger(), "[SC-Reloc] /hikari_loc/sc_reloc 收到调用");
+            const char* backend = reloc_->BackendIsKiss() ? "kiss" : "sc";
+            RCLCPP_INFO(this->get_logger(), "[Reloc] /hikari_loc/sc_reloc 收到调用 (backend=%s)", backend);
             std::lock_guard<std::mutex> lk(mutex_);
-            if (!reloc_->ScEnabled()) {
+            if (!reloc_->RelocReady()) {
                 response->success = false;
-                response->message = "SC not enabled";
+                response->message =
+                    reloc_->BackendIsKiss() ? "KISS target not ready" : "SC not enabled";
                 return;
             }
             if (!lio_has_output_) {
@@ -306,27 +321,30 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
 
             const CloudPtr scan = lio_->LatestDeskewedCloud();
             const SE3 current_imu_pose = lio_->LatestState().GetPose();
-            auto candidate = reloc_->ManualRelocalize(scan, current_imu_pose);
+            // KISS backend: 候选 pose 已在 RunKissOnce 内过 yaw 微扫 NDT (best NDT 解);
+            // SC backend: 候选未经 NDT, 节点侧统一再验. 两者下方 NDT 验证流一致.
+            auto candidate = reloc_->ManualRelocalize(scan, current_imu_pose, ndt_.get());
 
             if (!candidate.valid) {
                 response->success = false;
-                response->message = "SC query returned no valid candidate";
-                PublishScDebugTopics();
+                response->message = "relocalization returned no valid candidate";
+                if (reloc_->BackendIsSc()) PublishScDebugTopics();
                 return;
             }
 
-            // NDT validation: SC 候选用 reloc.sc_max_delta_* 专用 delta 门限 (C1, 同自动路径)
+            // NDT validation: 候选用 reloc.reloc_max_delta_* 专用 delta 门限 (C1, 同自动路径).
+            // KISS 候选已是 NDT 收敛解 → 再验 delta≈0, TP 复确认, 不会二次 reset.
             const NdtResult ndt_res = ndt_->Validate(candidate.pose, scan,
-                                                     reloc_->ScMaxDeltaTransM(),
-                                                     reloc_->ScMaxDeltaRotDeg());
+                                                     reloc_->RelocMaxDeltaTransM(),
+                                                     reloc_->RelocMaxDeltaRotDeg());
             if (!ndt_res.valid) {
                 RCLCPP_WARN(this->get_logger(),
-                            "[SC-Reloc] manual SC candidate kf_id=%d rejected by NDT "
+                            "[Reloc] manual %s candidate rejected by NDT "
                             "(conf=%.3f, dt=%.3f m, dr=%.2f deg)",
-                            candidate.kf_id, ndt_res.confidence, ndt_res.delta_trans_m, ndt_res.delta_rot_deg);
+                            backend, ndt_res.confidence, ndt_res.delta_trans_m, ndt_res.delta_rot_deg);
                 response->success = false;
                 response->message = "NDT validation failed";
-                PublishScDebugTopics();
+                if (reloc_->BackendIsSc()) PublishScDebugTopics();
                 return;
             }
 
@@ -340,33 +358,32 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
             has_pending_init_pose_ = false;
             init_retry_count_ = 0;
             ResetInitAccumulation();
-            // ResetToMapPose 后 LIO 位姿域断裂, 稳定门控分支下 reloc 仍 armed, 必须清空 SC 累积缓冲
+            // ResetToMapPose 后 LIO 位姿域断裂, 稳定门控分支下 reloc 仍 armed, 必须清空累积缓冲
             reloc_->ClearAccumulation();
 
             if (stability_gate_enabled_) {
                 stability_gate_.Reset();
-                state_machine_.SetInitializing("manual_sc_validated");
+                state_machine_.SetInitializing("manual_reloc_validated");
                 RCLCPP_INFO(this->get_logger(),
-                            "[SC-Reloc] manual SC accepted: kf_id=%d, pos=[%.3f, %.3f, %.3f], TP=%.3f, "
-                            "stability gate armed",
-                            candidate.kf_id, ndt_res.pose.translation().x(),
+                            "[Reloc] manual %s accepted: pos=[%.3f, %.3f, %.3f], TP=%.3f, stability gate armed",
+                            backend, ndt_res.pose.translation().x(),
                             ndt_res.pose.translation().y(), ndt_res.pose.translation().z(),
                             ndt_res.confidence);
             } else {
-                state_machine_.SetGood("manual_sc_validated");
+                state_machine_.SetGood("manual_reloc_validated");
                 if (reloc_->DisableAfterGood()) {
-                    reloc_->Disarm("manual_sc_validated");
+                    reloc_->Disarm("manual_reloc_validated");
                 }
                 RCLCPP_INFO(this->get_logger(),
-                            "[SC-Reloc] manual SC accepted: kf_id=%d, pos=[%.3f, %.3f, %.3f], TP=%.3f, GOOD",
-                            candidate.kf_id, ndt_res.pose.translation().x(),
+                            "[Reloc] manual %s accepted: pos=[%.3f, %.3f, %.3f], TP=%.3f, GOOD",
+                            backend, ndt_res.pose.translation().x(),
                             ndt_res.pose.translation().y(), ndt_res.pose.translation().z(),
                             ndt_res.confidence);
             }
 
             response->success = true;
-            response->message = "SC relocalization succeeded (kf_id=" + std::to_string(candidate.kf_id) + ")";
-            PublishScDebugTopics();
+            response->message = std::string("relocalization succeeded (backend=") + backend + ")";
+            if (reloc_->BackendIsSc()) PublishScDebugTopics();
         });
 
     // WAIT_FOR_INITIALPOSE 下帧可能不产出, 用 1Hz wall timer 持续上报状态
@@ -510,10 +527,10 @@ void LocLiteNode::ProcessFrame() {
 
     const auto loc_state = state_machine_.State();
 
-    // SC 查询点云滚动累积: armed (init/LOST) 期间逐帧入队 (降采样副本 + LIO 位姿).
-    // 必须在 SC cooldown 门之前逐帧执行, 否则缓冲 5s 才进 1 帧永远凑不齐;
+    // 查询点云滚动累积: armed (init/LOST) 期间逐帧入队 (降采样副本 + LIO 位姿). 两 backend 共用.
+    // 必须在 cooldown 门之前逐帧执行, 否则缓冲 5s 才进 1 帧永远凑不齐;
     // 合并/重力对齐/查询仍只在 TryScRelocalize 的 cooldown 节奏内发生.
-    if (reloc_->Armed() && reloc_->ScEnabled()) {
+    if (reloc_->Armed() && reloc_->RelocReady()) {
         reloc_->AccumulateScan(scan, lio_->LatestPose());
     }
 
@@ -532,10 +549,11 @@ void LocLiteNode::ProcessFrame() {
             lost_enter_ts_ = ts;
             RCLCPP_WARN(this->get_logger(), "tracking lost (reason=%s), waiting %.1f s before WAIT_FOR_INITIALPOSE",
                         state_machine_.Reason().c_str(), lost_timeout_sec_);
-            // Arm SC for LOST recovery
-            if (reloc_->AutoOnLost() && reloc_->ScEnabled()) {
+            // Arm reloc for LOST recovery
+            if (reloc_->AutoOnLost() && reloc_->RelocReady()) {
                 reloc_->Arm("lost", this->now().seconds());
-                RCLCPP_INFO(this->get_logger(), "SC armed for LOST recovery");
+                RCLCPP_INFO(this->get_logger(), "reloc armed for LOST recovery (backend=%s)",
+                            reloc_->BackendIsKiss() ? "kiss" : "sc");
             }
         }
 
@@ -586,8 +604,8 @@ void LocLiteNode::ProcessFrame() {
             return;
         }
 
-        // SC recovery in LOST state: attempt if armed and auto_on_lost
-        if (reloc_->Armed() && reloc_->AutoOnLost() && reloc_->ScEnabled()) {
+        // reloc recovery in LOST state: attempt if armed and auto_on_lost
+        if (reloc_->Armed() && reloc_->AutoOnLost() && reloc_->RelocReady()) {
             TryScRelocalize(scan, ts);
         }
 
@@ -596,8 +614,8 @@ void LocLiteNode::ProcessFrame() {
             PublishPose(state);
         }
     } else if (loc_state == LiteLocState::WaitForInitialPose || loc_state == LiteLocState::Uninitialized) {
-        // SC auto-on-init: attempt if armed and LIO has output
-        if (reloc_->Armed() && reloc_->AutoOnInit() && reloc_->ScEnabled()) {
+        // reloc auto-on-init: attempt if armed and LIO has output
+        if (reloc_->Armed() && reloc_->AutoOnInit() && reloc_->RelocReady()) {
             TryScRelocalize(scan, ts);
         }
     }
@@ -993,7 +1011,7 @@ void LocLiteNode::OnHealthTimer() {
                 if (st != LiteLocState::Lost) {
                     state_machine_.SetLost("input_timeout");
                     lost_enter_ts_ = -1.0;  // 重置, 输入恢复后由 ProcessFrame 的 Lost 分支按 scan ts 重新计时
-                    if (reloc_->AutoOnLost() && reloc_->ScEnabled()) {
+                    if (reloc_->AutoOnLost() && reloc_->RelocReady()) {
                         reloc_->Arm("input_timeout", now_wall);
                     }
                     RCLCPP_ERROR(this->get_logger(),
@@ -1090,29 +1108,36 @@ void LocLiteNode::TryScRelocalize(const CloudPtr& scan, double ts, bool manual) 
     }
     last_sc_attempt_ts_ = ts;
 
+    const char* backend = reloc_->BackendIsKiss() ? "kiss" : "sc";
     const SE3 current_imu_pose = lio_->LatestState().GetPose();
     RelocCandidate candidate;
     if (manual) {
-        candidate = reloc_->ManualRelocalize(scan, current_imu_pose);
+        candidate = reloc_->ManualRelocalize(scan, current_imu_pose, ndt_.get());
     } else {
-        candidate = reloc_->TryRelocalize(scan, current_imu_pose, wall_now);
+        candidate = reloc_->TryRelocalize(scan, current_imu_pose, wall_now, ndt_.get());
     }
 
-    PublishScDebugTopics();
+    // SC 调试话题仅 backend=sc 发布 (sc/accum_cloud/candidates/init_guess/gravity_check);
+    // KISS query(level) 云的发布见下方专门分支 (复用 sc/accum_cloud).
+    if (reloc_->BackendIsSc()) {
+        PublishScDebugTopics();
+    } else {
+        PublishKissAccumCloud();
+    }
 
     if (!candidate.valid) {
         return;
     }
 
-    // NDT validation: SC 候选用 reloc.sc_max_delta_* 专用 delta 门限 (C1) —
-    // SC sector 分辨率 6° 量化 + 关键帧间距使正确候选 delta 常超 ndt.* 门限 (/initialpose 量纲)
+    // NDT validation: 候选用 reloc.reloc_max_delta_* 专用 delta 门限 (C1) — SC sector 6° 量化 +
+    // 关键帧间距 / KISS yaw 微扫起点偏移使正确候选 delta 常超 ndt.* 门限 (/initialpose 量纲).
+    // KISS 候选已是 yaw 微扫 NDT 收敛解 → 再验 delta≈0, TP 复确认, 不会二次 reset.
     const NdtResult ndt_res =
-        ndt_->Validate(candidate.pose, scan, reloc_->ScMaxDeltaTransM(), reloc_->ScMaxDeltaRotDeg());
+        ndt_->Validate(candidate.pose, scan, reloc_->RelocMaxDeltaTransM(), reloc_->RelocMaxDeltaRotDeg());
     if (!ndt_res.valid) {
         RCLCPP_WARN(this->get_logger(),
-                    "[SC-Reloc] SC candidate kf_id=%d rejected by NDT "
-                    "(conf=%.3f, dt=%.3f m, dr=%.2f deg)",
-                    candidate.kf_id, ndt_res.confidence, ndt_res.delta_trans_m, ndt_res.delta_rot_deg);
+                    "[Reloc] %s candidate rejected by NDT (conf=%.3f, dt=%.3f m, dr=%.2f deg)",
+                    backend, ndt_res.confidence, ndt_res.delta_trans_m, ndt_res.delta_rot_deg);
         return;
     }
 
@@ -1126,25 +1151,25 @@ void LocLiteNode::TryScRelocalize(const CloudPtr& scan, double ts, bool manual) 
     has_pending_init_pose_ = false;
     init_retry_count_ = 0;
     ResetInitAccumulation();
-    // ResetToMapPose 后 LIO 位姿域断裂, 稳定门控分支下 reloc 仍 armed, 必须清空 SC 累积缓冲
+    // ResetToMapPose 后 LIO 位姿域断裂, 稳定门控分支下 reloc 仍 armed, 必须清空累积缓冲
     reloc_->ClearAccumulation();
 
     if (stability_gate_enabled_) {
         stability_gate_.Reset();
-        state_machine_.SetInitializing("sc_validated");
+        state_machine_.SetInitializing("reloc_validated");
         RCLCPP_INFO(this->get_logger(),
-                    "[SC-Reloc] SC accepted: kf_id=%d, pos=[%.3f, %.3f, %.3f], TP=%.3f, stability gate armed",
-                    candidate.kf_id, ndt_res.pose.translation().x(),
+                    "[Reloc] %s accepted: pos=[%.3f, %.3f, %.3f], TP=%.3f, stability gate armed",
+                    backend, ndt_res.pose.translation().x(),
                     ndt_res.pose.translation().y(), ndt_res.pose.translation().z(),
                     ndt_res.confidence);
     } else {
-        state_machine_.SetGood("sc_validated");
+        state_machine_.SetGood("reloc_validated");
         if (reloc_->DisableAfterGood()) {
-            reloc_->Disarm("sc_validated");
+            reloc_->Disarm("reloc_validated");
         }
         RCLCPP_INFO(this->get_logger(),
-                    "[SC-Reloc] SC accepted: kf_id=%d, pos=[%.3f, %.3f, %.3f], TP=%.3f, GOOD",
-                    candidate.kf_id, ndt_res.pose.translation().x(),
+                    "[Reloc] %s accepted: pos=[%.3f, %.3f, %.3f], TP=%.3f, GOOD",
+                    backend, ndt_res.pose.translation().x(),
                     ndt_res.pose.translation().y(), ndt_res.pose.translation().z(),
                     ndt_res.confidence);
     }
@@ -1225,6 +1250,21 @@ void LocLiteNode::PublishScDebugTopics() {
         auto msg = std::make_unique<std_msgs::msg::Float32MultiArray>();
         msg->data = {debug.roll_err_deg, debug.pitch_err_deg, debug.gravity_passed ? 1.0f : 0.0f};
         sc_gravity_check_pub_->publish(std::move(msg));
+    }
+}
+
+void LocLiteNode::PublishKissAccumCloud() {
+    // KISS query 云 (level 系: 20 帧累积合并到最新帧 body 系后重力对齐, 即 MatchGlobal 实际输入).
+    // 复用 SC accum_cloud 话题; KISS 无 candidates/init_guess/gravity_check 概念, 不发那些.
+    if (sc_accum_cloud_pub_->get_subscription_count() > 0) {
+        const CloudPtr query_cloud = reloc_->LastQueryCloud();
+        if (query_cloud && !query_cloud->empty()) {
+            sensor_msgs::msg::PointCloud2 msg;
+            pcl::toROSMsg(*query_cloud, msg);
+            msg.header.stamp = this->now();
+            msg.header.frame_id = level_frame_id_;
+            sc_accum_cloud_pub_->publish(msg);
+        }
     }
 }
 

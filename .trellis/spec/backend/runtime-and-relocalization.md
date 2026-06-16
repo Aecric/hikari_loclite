@@ -136,15 +136,71 @@ immediately Good" behavior. Reset the gate on every `ResetToMapPose()` path
   `ResetToMapPose()`.
 - Rejected initial poses must leave Fast-LIO state unchanged.
 
+## Relocalization Backend Selector
+
+`RelocManager` dispatches on `reloc.reloc_backend` (`kiss` | `sc`, **default
+`kiss`**). The selector is the cross-layer contract every call site must respect.
+
+### Contract
+
+- `RelocBackend Backend()` / `BackendIsKiss()` / `BackendIsSc()`.
+- `bool RelocReady()` — backend-agnostic readiness predicate. **Use this, not
+  `ScEnabled()`**, to guard arm / accumulate / trigger in the node
+  (`kiss` → KISS target injected & under point guard; `sc` → SC enabled).
+- `TryRelocalize(scan, current_imu_pose, current_time, NdtCorrector* ndt)` and
+  `ManualRelocalize(scan, current_imu_pose, NdtCorrector* ndt)` both take the NDT
+  corrector now — the KISS path runs NDT internally (yaw sweep). SC backend may
+  pass it through but does not require it.
+- `SetKissTarget(FixedMapCloud())` is called once after the fixed map loads
+  (only meaningful for `kiss`). Target is the whole `global.pcd` pre-voxelized
+  and cached as `vector<Vec3f>`; small map needs no crop. `max_target_pts` guard
+  warns-and-skips (target stays not-ready) rather than crashing on a huge map.
+- `RelocMaxDeltaTransM()` / `RelocMaxDeltaRotDeg()` (config
+  `reloc.reloc_max_delta_*`, renamed from `sc_max_delta_*`, old keys still read
+  as fallback) — shared NDT-validation delta gate for both backends; wider than
+  `ndt.max_delta_*` because both SC sector quantization and KISS yaw-sweep start
+  offsets push the correct candidate's delta past the `/initialpose` gate.
+
+### KISS path (`RunKissOnce`)
+
+```
+accumulate 20 frames (shared with SC) → gravity-align to level
+  → KISS.MatchGlobal(query_level)            # global 6DOF, no initial guess
+  → gate: valid && rot_inliers>=min_rotation_inliers && final_inliers>=min_final_inliers
+  → compose T_map_lidar = T_map_level * SE3(R_body_level, 0)   # level→lidar frame
+  → yaw sweep [-range,+range]@step (deg): NdtCorrector::Validate each start, keep best TP
+  → any NDT-valid? pose = best NDT solution, source="kiss"/"manual_kiss"
+                 : reject (clean return + log), wait cooldown / → WAIT
+```
+
+Config: `reloc.kiss_voxel_size` (0.3), `target_pre_voxel` (0.2),
+`max_target_pts` (800000), `min_rotation_inliers` (50), `min_final_inliers`
+(30), `yaw_refine_range_deg` (9), `yaw_refine_step_deg` (3). KISS rotation `R`
+**must** be orthonormalized via `Eigen::Quaterniond` before constructing `SO3`,
+or Sophus asserts.
+
+### SC retained but disabled by default
+
+All SC code (`ScanContextManager`, `LoadPoses`, `KfIdToMapPose`, `kf_poses_`,
+`RunScanContextOnce`, the `sc/*` debug topics) is kept compilable for A/B and
+fallback. When `reloc_backend=kiss` (default) the node does **not** load the SC
+database / poses and does **not** publish `sc/candidates|init_guess|gravity_check`
+(it reuses `sc/accum_cloud` via `PublishKissAccumCloud()` for the KISS query
+cloud). Manual service name `hikari_loc/sc_reloc` is preserved for downstream
+compatibility; it dispatches by backend internally.
+
 ## LOST Recovery
 
 - LOST should arm `RelocManager`.
 - `RelocManager::TryRelocalize()` should return immediately if disarmed or if
   the scan is empty.
-- A successful SC candidate must pass NDT validation before state reset.
+- A successful candidate (KISS or SC) must pass NDT validation before state
+  reset. For the KISS backend the candidate pose is already the yaw-sweep NDT
+  solution, so node-side re-validation confirms it (delta ≈ 0) rather than
+  re-aligning.
 - After successful relocalization, set Good and disarm relocalization.
-- In Good state, disarm relocalization so SC threads or workers do not consume
-  CPU.
+- In Good state, disarm relocalization so relocalization threads or workers do
+  not consume CPU.
 
 ### Convention: one clock domain per comparison (gotcha, bag-verified)
 

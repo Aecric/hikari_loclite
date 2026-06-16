@@ -18,7 +18,7 @@ system:
   base_to_lidar_pitch: 0.0              # base_link → lidar 外参旋转 pitch (rad)
   base_to_lidar_yaw: 0.0                # base_link → lidar 外参旋转 yaw (rad)
   external_pose_blackout_sec: 5.0       # /initialpose 注入后 SC 抢注阻断窗口 (秒, P5 SC 管线接入后生效)
-  lost_timeout_sec: 5.0                 # Lost 持续超过该时长才转 WAIT_FOR_INITIALPOSE
+  lost_timeout_sec: 1.0                 # Lost 持续超过该时长才转 WAIT_FOR_INITIALPOSE
   level_frame_cutoff_freq: 0.5          # 重力对齐低通滤波截止频率 (Hz)
 
   # ==== CPU 亲和 / 实时调度 (Phase6 产品化) ====
@@ -53,7 +53,22 @@ reloc:
   init_accum_max_wait_sec: 5.0          # 单次 /initialpose 最长等待; 超过仍未验证成功则回 WAIT
   init_accum_voxel_leaf: 0.1            # 累积点云送入 FC/NDT 前的体素降采样 leaf
 
-  # ==== SC 重定位 (Phase 5) ====
+  # ==== 重定位后端选择器 ====
+  reloc_backend: kiss                   # kiss | sc; 默认 KISS 全局配准 (无需初值 6DOF), SC 保留可切回做 A/B/回退
+                                        # kiss: 整图 KISS-Matcher → inlier 闸 → yaw 微扫 NDT → Reset (走廊不再收向原点)
+                                        # sc:   Scan Context ring-key 查询 (走廊沿轴结构性失效, 仅作回退)
+                                        # 默认 kiss 时不加载 SC database/poses, 不跑 SC, 不发 SC 专有调试话题
+
+  # ==== KISS-Matcher 全局配准 (默认后端) ====
+  kiss_voxel_size: 0.3                  # KISS FasterPFH 主体素 (m); normal/fpfh 半径按其倍数推
+  target_pre_voxel: 0.2                 # target (整张 global.pcd) 懒加载后预降采样 leaf (m), 缓存复用
+  max_target_pts: 800000               # target 预降采样后点数护栏; 超限告警跳过 (本图小, 不会触发)
+  min_rotation_inliers: 50             # GNC 旋转内点置信闸; 低于此判低置信拒绝
+  min_final_inliers: 30                # COTE 平移内点置信闸 (更严); 低于此判低置信拒绝
+  yaw_refine_range_deg: 9.0            # KISS 粗解后 yaw 微扫范围 ±deg (退化场景保险丝)
+  yaw_refine_step_deg: 3.0             # yaw 微扫步长 deg; 逐起点跑 NDT.Validate 取最佳 TP
+
+  # ==== SC 重定位 (Phase 5; 仅 reloc_backend=sc 时加载/运行) ====
   sc_enabled: true                      # 是否启用 Scan Context 重定位
   auto_on_init: true                    # 冷启动时自动尝试 SC (不依赖 /initialpose)
   auto_on_lost: false                    # LOST 态自动 arm SC 恢复
@@ -78,13 +93,15 @@ reloc:
   sc_accum_voxel_leaf: 0.1              # 累积帧入队前 + 合并后的体素降采样 leaf (m); 控制 20 帧合计点数在几万点级
   sc_accum_max_rel_trans_m: 1.0         # 累积发散守门: 与上一入队帧相对平移超此值不入队 (LOST 后 LIO 速度积分跑飞实测 ~5m/帧, 拼接糊掉查询云); 不清空缓冲, 环形 pop 自然换血
 
-  # ==== SC 候选验证专用 delta 门限 ====
-  # 仅 SC 候选验证使用; /initialpose 验证保持 ndt.max_delta_* 原门限.
-  # ndt.* 门限 (1m/10°) 按 /initialpose 量纲设定, 对 SC 候选过紧: SC sector 分辨率 360/60=6°,
-  # yaw_diff 量化误差 + 斜装近似使正确候选 delta_rot 常落 6~12° (实测正确候选 dr=10.55° > 10°
-  # 被拒, 而 TP=3.09 极好); 关键帧间距也使 delta_trans 可超 1m.
-  sc_max_delta_trans_m: 2.0             # SC 候选 NDT 验证: 收敛位姿相对候选的平移上限 (m)
-  sc_max_delta_rot_deg: 15.0            # SC 候选 NDT 验证: 收敛位姿相对候选的旋转上限 (deg)
+  # ==== 重定位候选验证专用 delta 门限 (KISS / SC 共用) ====
+  # 仅重定位候选验证使用; /initialpose 验证保持 ndt.max_delta_* 原门限.
+  # ndt.* 门限 (1m/10°) 按 /initialpose 量纲设定, 对重定位候选过紧:
+  #   SC: sector 分辨率 360/60=6°, yaw_diff 量化误差 + 斜装近似使正确候选 delta_rot 常落 6~12°
+  #       (实测正确候选 dr=10.55° > 10° 被拒, 而 TP=3.09 极好); 关键帧间距也使 delta_trans 可超 1m.
+  #   KISS: yaw 微扫各起点位姿与最终 NDT 收敛解之间的 delta 同样需放宽 (起点偏移 ±9°/几 m).
+  # 代码兼容读旧键 sc_max_delta_* (缺新键时回退); 配置文件统一用新键.
+  reloc_max_delta_trans_m: 2.0          # 重定位候选 NDT 验证: 收敛位姿相对候选的平移上限 (m)
+  reloc_max_delta_rot_deg: 15.0         # 重定位候选 NDT 验证: 收敛位姿相对候选的旋转上限 (deg)
 
 runtime:
   publish_tf: true                      # map→base_link 与 lidar_frame→level_frame TF

@@ -16,7 +16,9 @@ INIT/LOST state:
   /initialpose or SC/NDT candidate → NDT validation → Fast-LIO ResetToMapPose() → fixed-map tracking
 ```
 
-Explicitly does NOT include: PGO, dynamic maps, Pangolin UI, KISS as default capability, full LidarLoc state machine, persistent SC/KISS background threads.
+Explicitly does NOT include: PGO, dynamic maps, Pangolin UI, full LidarLoc state machine, persistent SC/KISS background threads.
+
+The default relocalization backend is KISS-Matcher global registration (cold-start first frame + manual reloc). It runs as a one-shot bounded query, not a persistent background worker — the "no persistent SC/KISS background threads" exclusion still holds.
 
 ## Build / run
 
@@ -41,7 +43,11 @@ sudo setcap cap_sys_nice+ep install/hikari_loclite/lib/hikari_loclite/run_loclit
 
 First version only: `rclcpp`, `sensor_msgs`, `nav_msgs`, `geometry_msgs`, `std_msgs`, `std_srvs`, `tf2`, `tf2_ros`, `tf2_geometry_msgs`, `pcl_conversions`, `pcl_ros`, `livox_ros_driver2`, `yaml-cpp`, PCL, Eigen3, OpenMP.
 
-Do NOT add: Pangolin, OpenCV highgui, KISS-Matcher, miao optimizer, g2o, rosbag2_cpp, visualization_msgs.
+KISS-Matcher (vendored v1.0.2, with its transitive deps ROBIN / PMC / TEASER++ / TBB / flann / lz4 — all permissive: MIT / BSD / Apache-2.0 / MPL2) is the default relocalization backend. Vendored under `thirdparty/` and compiled behind the `USE_KISS_MATCHER` switch (ON by default); the wrapper degrades to nullopt when not built.
+
+**Decision (2026-06-16, user-approved, per the Pangolin UI scope precedent):** the original "Do NOT add KISS-Matcher" ban is lifted. Rationale: SC ring-key relocalization is structurally degenerate in corridors ("collapses to origin"); KISS-Matcher's 3D feature-correspondence + GNC gives no-prior global 6DOF with far stronger discriminability. Reloc is one-shot and bounded (single shot ≤20s acceptable), so the embedded reloc benefit outweighs the dependency cost. Default `reloc.reloc_backend=kiss`; SC code is retained but disabled by default and selectable (`reloc_backend=sc`) for A/B and fallback.
+
+Do NOT add: Pangolin, OpenCV highgui, miao optimizer, g2o, rosbag2_cpp, visualization_msgs.
 
 ## Code reuse from lightning-lm
 
@@ -84,7 +90,7 @@ Single yaml file (`config/loclite_livox.yaml`). Key sections:
 - `fixed_map.*` — global PCD path, voxel leaf, crop radius, max points
 - `fast_lio.*` — scan filter, iVox grid, iterations, lidar type, extrinsics
 - `ndt.*` — threads, resolution, correction/lost rates, confidence/delta gates, gain per state
-- `reloc.*` — auto arm/disarm, SC database path, cooldown, KISS/FP toggles
+- `reloc.*` — `reloc_backend` selector (`kiss`|`sc`, default `kiss`); KISS knobs (`kiss_voxel_size`, `target_pre_voxel`, `max_target_pts`, `min_rotation_inliers`, `min_final_inliers`, `yaw_refine_range_deg`, `yaw_refine_step_deg`); shared candidate-validation gates (`reloc_max_delta_trans_m`, `reloc_max_delta_rot_deg`); auto arm/disarm, cooldown; retained SC keys (`sc_*`, `poses_txt`) used only when `reloc_backend=sc`
 - `smoother.*` — jump thresholds for output and correction
 
 ## Design document

@@ -16,6 +16,19 @@ bool RelocManager::Init(const std::string& yaml_path, const std::string& map_dir
         auto yaml = YAML::LoadFile(yaml_path);
         if (yaml["reloc"]) {
             auto reloc = yaml["reloc"];
+
+            // backend 选择器 (默认 kiss): kiss=KISS-Matcher 全局配准, sc=旧 Scan Context 回退.
+            const std::string backend_str = reloc["reloc_backend"].as<std::string>("kiss");
+            if (backend_str == "sc") {
+                backend_ = RelocBackend::Sc;
+            } else {
+                backend_ = RelocBackend::Kiss;
+                if (backend_str != "kiss") {
+                    LOG(WARNING) << "[RelocManager] unknown reloc_backend '" << backend_str
+                                 << "', defaulting to kiss";
+                }
+            }
+
             auto_on_init_ = reloc["auto_on_init"].as<bool>(true);
             auto_on_lost_ = reloc["auto_on_lost"].as<bool>(true);
             disable_after_good_ = reloc["disable_after_good"].as<bool>(true);
@@ -26,16 +39,31 @@ bool RelocManager::Init(const std::string& yaml_path, const std::string& map_dir
             gravity_roll_thres_deg_ = reloc["gravity_roll_thres_deg"].as<double>(30.0);
             gravity_pitch_thres_deg_ = reloc["gravity_pitch_thres_deg"].as<double>(30.0);
 
-            // SC 查询点云滚动累积 (Phase 3): 单帧太稀, 倾斜安装下描述子不稳定
+            // 查询点云滚动累积 (Phase 3): 单帧太稀, 倾斜安装下描述子不稳定. 两 backend 共用累积.
             sc_accum_frames_ = reloc["sc_accum_frames"].as<int>(20);
             sc_accum_voxel_leaf_ = reloc["sc_accum_voxel_leaf"].as<double>(0.1);
             // 累积发散守门 (C3): LOST 后 LIO 速度积分跑飞时相对位姿不可用于拼接
             sc_accum_max_rel_trans_m_ = reloc["sc_accum_max_rel_trans_m"].as<double>(1.0);
 
-            // SC 候选验证专用 delta 门限 (C1): ndt.max_delta_* 按 /initialpose 量纲设定,
-            // 对 SC 候选过紧 (sector 分辨率 6° 量化 + 关键帧间距, 实测正确候选 dr=10.55° 被拒)
-            sc_max_delta_trans_m_ = reloc["sc_max_delta_trans_m"].as<double>(2.0);
-            sc_max_delta_rot_deg_ = reloc["sc_max_delta_rot_deg"].as<double>(15.0);
+            // 候选 NDT 验证专用 delta 门限 (C1): ndt.max_delta_* 按 /initialpose 量纲设定,
+            // 对 SC/KISS 候选过紧 (sector 6° 量化 + 关键帧间距; KISS yaw 微扫起点偏移). 两 backend 共用.
+            // 新键 reloc_max_delta_*; 旧键 sc_max_delta_* 保留兼容读取 (旧键存在时作为后备默认).
+            const double legacy_dt = reloc["sc_max_delta_trans_m"].as<double>(2.0);
+            const double legacy_dr = reloc["sc_max_delta_rot_deg"].as<double>(15.0);
+            reloc_max_delta_trans_m_ = reloc["reloc_max_delta_trans_m"].as<double>(legacy_dt);
+            reloc_max_delta_rot_deg_ = reloc["reloc_max_delta_rot_deg"].as<double>(legacy_dr);
+
+            // KISS-Matcher 参数 (R4): backend=kiss 时填 KissGlobalMatcher::Config.
+            KissGlobalMatcher::Config kiss_cfg;
+            kiss_cfg.kiss_voxel_size = reloc["kiss_voxel_size"].as<float>(0.3f);
+            kiss_cfg.target_pre_voxel = reloc["target_pre_voxel"].as<double>(0.2);
+            kiss_cfg.max_target_pts = reloc["max_target_pts"].as<size_t>(800000);
+            kiss_cfg.min_rotation_inliers = reloc["min_rotation_inliers"].as<size_t>(50);
+            kiss_cfg.min_final_inliers = reloc["min_final_inliers"].as<size_t>(30);
+            kiss_ = KissGlobalMatcher(kiss_cfg);
+            // yaw 微扫范围/步长 (退化场景保险丝)
+            yaw_refine_range_deg_ = reloc["yaw_refine_range_deg"].as<double>(9.0);
+            yaw_refine_step_deg_ = reloc["yaw_refine_step_deg"].as<double>(3.0);
 
             // SC database and poses: prefer map_dir, fallback to explicit YAML paths
             std::string sc_db_path = reloc["sc_database"].as<std::string>("");
@@ -46,45 +74,52 @@ bool RelocManager::Init(const std::string& yaml_path, const std::string& map_dir
                 if (poses_path.empty()) poses_path = map_dir + "/poses.txt";
             }
 
-            if (!sc_enabled_) {
-                LOG(INFO) << "[RelocManager] SC disabled by config";
-                return true;
-            }
-
-            // Load poses first (needed to map kf_id -> map pose)
-            if (!poses_path.empty()) {
-                if (!LoadPoses(poses_path)) {
-                    LOG(WARNING) << "[RelocManager] failed to load poses: " << poses_path
-                                 << " (SC candidates will have no map pose)";
-                }
+            // backend=kiss: 不加载 SC database / poses.txt (省 IO/CPU); KISS target 由节点 SetKissTarget 注入.
+            if (backend_ == RelocBackend::Kiss) {
+                LOG(INFO) << "[RelocManager] backend=kiss: SC database/poses NOT loaded "
+                             "(KISS target will be injected by node)";
             } else {
-                LOG(WARNING) << "[RelocManager] no poses_txt configured";
-            }
+                // backend=sc: 维持现有 SC 加载流程.
+                if (!sc_enabled_) {
+                    LOG(INFO) << "[RelocManager] SC disabled by config";
+                    return true;
+                }
 
-            // Load SC database
-            if (!sc_db_path.empty()) {
-                ScanContextManager::Options sc_options;
-                // Load SC options from yaml if present
-                if (reloc["sc_pc_num_ring"]) sc_options.pc_num_ring = reloc["sc_pc_num_ring"].as<int>(20);
-                if (reloc["sc_pc_num_sector"]) sc_options.pc_num_sector = reloc["sc_pc_num_sector"].as<int>(60);
-                if (reloc["sc_dist_thres"]) sc_options.sc_dist_thres = reloc["sc_dist_thres"].as<double>(0.13);
-                if (reloc["sc_pc_max_radius"]) sc_options.pc_max_radius = reloc["sc_pc_max_radius"].as<double>(80.0);
-                if (reloc["sc_lidar_height"]) sc_options.lidar_height = reloc["sc_lidar_height"].as<double>(2.0);
-                if (reloc["sc_num_candidates_from_tree"])
-                    sc_options.num_candidates_from_tree = reloc["sc_num_candidates_from_tree"].as<int>(10);
-
-                sc_manager_.SetOptions(sc_options);
-                if (!sc_manager_.LoadDatabase(sc_db_path)) {
-                    LOG(WARNING) << "[RelocManager] failed to load SC database: " << sc_db_path
-                                 << " (SC relocalization unavailable)";
-                    sc_enabled_ = false;
+                // Load poses first (needed to map kf_id -> map pose)
+                if (!poses_path.empty()) {
+                    if (!LoadPoses(poses_path)) {
+                        LOG(WARNING) << "[RelocManager] failed to load poses: " << poses_path
+                                     << " (SC candidates will have no map pose)";
+                    }
                 } else {
-                    LOG(INFO) << "[RelocManager] SC database loaded: " << sc_db_path
-                              << " (" << sc_manager_.GetScanContextCount() << " entries)";
+                    LOG(WARNING) << "[RelocManager] no poses_txt configured";
                 }
-            } else {
-                LOG(WARNING) << "[RelocManager] no sc_database path configured";
-                sc_enabled_ = false;
+
+                // Load SC database
+                if (!sc_db_path.empty()) {
+                    ScanContextManager::Options sc_options;
+                    // Load SC options from yaml if present
+                    if (reloc["sc_pc_num_ring"]) sc_options.pc_num_ring = reloc["sc_pc_num_ring"].as<int>(20);
+                    if (reloc["sc_pc_num_sector"]) sc_options.pc_num_sector = reloc["sc_pc_num_sector"].as<int>(60);
+                    if (reloc["sc_dist_thres"]) sc_options.sc_dist_thres = reloc["sc_dist_thres"].as<double>(0.13);
+                    if (reloc["sc_pc_max_radius"]) sc_options.pc_max_radius = reloc["sc_pc_max_radius"].as<double>(80.0);
+                    if (reloc["sc_lidar_height"]) sc_options.lidar_height = reloc["sc_lidar_height"].as<double>(2.0);
+                    if (reloc["sc_num_candidates_from_tree"])
+                        sc_options.num_candidates_from_tree = reloc["sc_num_candidates_from_tree"].as<int>(10);
+
+                    sc_manager_.SetOptions(sc_options);
+                    if (!sc_manager_.LoadDatabase(sc_db_path)) {
+                        LOG(WARNING) << "[RelocManager] failed to load SC database: " << sc_db_path
+                                     << " (SC relocalization unavailable)";
+                        sc_enabled_ = false;
+                    } else {
+                        LOG(INFO) << "[RelocManager] SC database loaded: " << sc_db_path
+                                  << " (" << sc_manager_.GetScanContextCount() << " entries)";
+                    }
+                } else {
+                    LOG(WARNING) << "[RelocManager] no sc_database path configured";
+                    sc_enabled_ = false;
+                }
             }
         }
     } catch (const std::exception& e) {
@@ -92,7 +127,8 @@ bool RelocManager::Init(const std::string& yaml_path, const std::string& map_dir
         return false;
     }
 
-    LOG(INFO) << "[RelocManager] init: auto_on_init=" << auto_on_init_
+    LOG(INFO) << "[RelocManager] init: backend=" << (backend_ == RelocBackend::Kiss ? "kiss" : "sc")
+              << ", auto_on_init=" << auto_on_init_
               << ", auto_on_lost=" << auto_on_lost_
               << ", disable_after_good=" << disable_after_good_
               << ", sc_enabled=" << sc_enabled_
@@ -101,10 +137,13 @@ bool RelocManager::Init(const std::string& yaml_path, const std::string& map_dir
               << ", sc_accum_frames=" << sc_accum_frames_
               << ", sc_accum_voxel_leaf=" << sc_accum_voxel_leaf_
               << ", sc_accum_max_rel_trans_m=" << sc_accum_max_rel_trans_m_
-              << ", sc_max_delta=" << sc_max_delta_trans_m_ << "m/" << sc_max_delta_rot_deg_ << "deg"
+              << ", reloc_max_delta=" << reloc_max_delta_trans_m_ << "m/" << reloc_max_delta_rot_deg_ << "deg"
+              << ", yaw_refine=±" << yaw_refine_range_deg_ << "@" << yaw_refine_step_deg_ << "deg"
               << ", poses=" << kf_poses_.size();
     return true;
 }
+
+void RelocManager::SetKissTarget(const CloudPtr& map_cloud) { kiss_.SetTarget(map_cloud); }
 
 bool RelocManager::LoadPoses(const std::string& path) {
     std::ifstream ifs(path);
@@ -155,7 +194,8 @@ void RelocManager::Disarm(const char* reason) {
 }
 
 void RelocManager::AccumulateScan(const CloudPtr& scan, const SE3& lidar_pose) {
-    if (!sc_enabled_ || sc_accum_frames_ <= 1) return;
+    // 累积缓冲两 backend 共用 (KISS query 与 SC query 都用累积 + 重力对齐云).
+    if (!RelocReady() || sc_accum_frames_ <= 1) return;
     if (!scan || scan->empty()) return;
 
     // 发散守门 (C3): LOST 后 LIO 速度积分可能跑飞 (实测每帧位移 ~5m), 此时"短时局部自洽"
@@ -280,33 +320,43 @@ SE3 RelocManager::KfIdToMapPose(int kf_id, float yaw_diff_rad, const SE3& curren
     return SE3(SO3(R_map), kf_pos);
 }
 
-RelocCandidate RelocManager::TryRelocalize(const CloudPtr& scan, const SE3& current_imu_pose, double current_time) {
+RelocCandidate RelocManager::TryRelocalize(const CloudPtr& scan, const SE3& current_imu_pose,
+                                           double current_time, NdtCorrector* ndt) {
     if (!Armed()) return {};
-    if (!sc_enabled_) return {};
+    if (!RelocReady()) return {};
     if (!scan || scan->empty()) return {};
 
-    // Check max runtime: disarm if SC has been trying too long
+    // Check max runtime: disarm if relocalization has been trying too long
     if (max_runtime_sec_ > 0.0 && arm_ts_ > 0.0 && current_time > 0.0 &&
         current_time - arm_ts_ > max_runtime_sec_) {
-        LOG(WARNING) << "[RelocManager] SC max runtime exceeded (" << max_runtime_sec_ << " s), disarming";
+        LOG(WARNING) << "[RelocManager] max runtime exceeded (" << max_runtime_sec_ << " s), disarming";
         Disarm("max_runtime_exceeded");
         return {};
     }
 
+    if (backend_ == RelocBackend::Kiss) {
+        return RunKissOnce(scan, current_imu_pose, false, ndt);
+    }
     return RunScanContextOnce(scan, current_imu_pose, false);
 }
 
-RelocCandidate RelocManager::ManualRelocalize(const CloudPtr& scan, const SE3& current_imu_pose) {
-    if (!sc_enabled_) {
-        LOG(WARNING) << "[RelocManager] manual SC relocalize: SC not enabled";
+RelocCandidate RelocManager::ManualRelocalize(const CloudPtr& scan, const SE3& current_imu_pose,
+                                              NdtCorrector* ndt) {
+    if (!RelocReady()) {
+        LOG(WARNING) << "[RelocManager] manual relocalize: backend not ready ("
+                     << (backend_ == RelocBackend::Kiss ? "KISS target missing" : "SC not enabled") << ")";
         return {};
     }
     if (!scan || scan->empty()) {
-        LOG(WARNING) << "[RelocManager] manual SC relocalize: empty scan";
+        LOG(WARNING) << "[RelocManager] manual relocalize: empty scan";
         return {};
     }
 
-    LOG(INFO) << "[RelocManager] manual SC relocalize requested (bypasses blackout/cooldown)";
+    LOG(INFO) << "[RelocManager] manual relocalize requested (bypasses blackout/cooldown), backend="
+              << (backend_ == RelocBackend::Kiss ? "kiss" : "sc");
+    if (backend_ == RelocBackend::Kiss) {
+        return RunKissOnce(scan, current_imu_pose, true, ndt);
+    }
     return RunScanContextOnce(scan, current_imu_pose, true);
 }
 
@@ -414,6 +464,117 @@ RelocCandidate RelocManager::RunScanContextOnce(const CloudPtr& scan, const SE3&
                   << candidates.size() << " candidates)";
     }
 
+    return result;
+}
+
+RelocCandidate RelocManager::RunKissOnce(const CloudPtr& scan, const SE3& current_imu_pose, bool manual,
+                                         NdtCorrector* ndt) {
+    RelocCandidate result;
+    result.kf_id = -1;
+    debug_ = ScDebugInfo{};
+    last_query_cloud_.reset();
+
+    if (!kiss_.TargetReady()) {
+        LOG_EVERY_T(WARNING, 5.0) << "[KISS-Reloc] target not ready (SetKissTarget first), skip";
+        return result;
+    }
+    if (!ndt) {
+        LOG(ERROR) << "[KISS-Reloc] NDT corrector null, cannot refine/validate, skip";
+        return result;
+    }
+
+    // Step 1: 构造查询点云 — 复用 SC 路径同款滚动累积 (单帧太稀, 倾斜安装下特征不稳定)
+    CloudPtr query_cloud;
+    const int accum_frames = AccumulatedFrames();
+    if (sc_accum_frames_ > 1) {
+        if (accum_frames >= sc_accum_frames_) {
+            query_cloud = BuildAccumulatedQueryCloud();
+        } else if (manual) {
+            LOG(WARNING) << "[KISS-Reloc] manual KISS with insufficient accumulation (frames=" << accum_frames
+                         << "/" << sc_accum_frames_ << "), falling back to single scan";
+            query_cloud = scan;
+        } else {
+            LOG(INFO) << "[KISS-Reloc] accumulating frames=" << accum_frames << "/" << sc_accum_frames_
+                      << ", skipping this attempt";
+            return result;
+        }
+    } else {
+        query_cloud = scan;
+    }
+    if (!query_cloud || query_cloud->empty()) {
+        LOG(WARNING) << "[KISS-Reloc] query cloud empty, skip";
+        return result;
+    }
+
+    // Step 2: 重力对齐到水平 (level) 系 (去 roll/pitch 倾斜); KISS target 是固定地图 (map 系),
+    // KISS 全局配准本身无需初值, 输出 T_map_query_level. 与 SC 路径同样的 level 化 query.
+    CloudPtr cloud_level = GravityAlignCloud(query_cloud, current_imu_pose);
+    last_query_cloud_ = cloud_level;
+
+    LOG(INFO) << "[KISS-Reloc] query: accum_frames=" << accum_frames
+              << ", query_points=" << cloud_level->size() << (manual ? " (manual)" : "");
+
+    // Step 3: KISS estimate (无需初值的粗 6DOF) + inlier 闸 (在 wrapper 内做)
+    const auto kiss_res = kiss_.MatchGlobal(cloud_level);
+    if (!kiss_res.valid) {
+        LOG(INFO) << "[KISS-Reloc] KISS estimate invalid (no match / inliers below gate)";
+        return result;
+    }
+    // KISS 解 T_map_level 把 level 系 query 对齐到 map (p_map = T_map_level * p_level).
+    // 但 NDT 验证喂的是原始去畸变 scan (lidar/body 系), 而 query 是 cloud_level = R_body_level * scan_body.
+    // 故需把 T_map_level 复合回 lidar 系: T_map_lidar = T_map_level * SE3(R_body_level, 0).
+    // R_body_level 取自 GravityAlignCloud 同款公式 (用同一 current_imu_pose, 保证域一致).
+    const Mat3d R_world_body = current_imu_pose.so3().matrix();
+    const double yaw_wb = std::atan2(R_world_body(1, 0), R_world_body(0, 0));
+    const Mat3d R_yaw_only = Eigen::AngleAxisd(yaw_wb, Vec3d::UnitZ()).toRotationMatrix();
+    const Mat3d R_body_level = R_yaw_only.transpose() * R_world_body;
+    const SE3 T_level_lidar(SO3(R_body_level), Vec3d::Zero());
+    const SE3 T_map_lidar = kiss_res.pose * T_level_lidar;
+    LOG(INFO) << "[KISS-Reloc] coarse 6DOF (T_map_lidar): pos=[" << T_map_lidar.translation().x() << ", "
+              << T_map_lidar.translation().y() << ", " << T_map_lidar.translation().z()
+              << "], rot_inl=" << kiss_res.rotation_inliers << ", final_inl=" << kiss_res.final_inliers;
+
+    // Step 4: yaw 微扫 (退化场景保险丝) — 在 KISS 粗解 yaw 上叠加 [-range,+range]@step,
+    // 逐起点构 SE3 调 NdtCorrector::Validate (既精修也是候选二次闸), 取 valid && TP 最高的.
+    // 验证用的 scan 是当前帧去畸变云 (lidar 系), 与 SC 路径一致 (NDT Validate 内部做 lidar->map 配准).
+    NdtResult best_ndt;
+    bool found = false;
+    const int n_step = (yaw_refine_step_deg_ > 0.0)
+                           ? static_cast<int>(std::round(yaw_refine_range_deg_ / yaw_refine_step_deg_))
+                           : 0;
+    for (int i = -n_step; i <= n_step; ++i) {
+        const double d_rad = static_cast<double>(i) * yaw_refine_step_deg_ * M_PI / 180.0;
+        // 在 map 系 z 轴 (重力轴) 上叠加 yaw 偏移: T = Rz(d) * T_map_lidar (绕地图原点 z 旋转位置+朝向)
+        const SE3 T_yaw(SO3(Eigen::AngleAxisd(d_rad, Vec3d::UnitZ()).toRotationMatrix()), Vec3d::Zero());
+        const SE3 guess = T_yaw * T_map_lidar;
+
+        const NdtResult ndt_res =
+            ndt->Validate(guess, scan, reloc_max_delta_trans_m_, reloc_max_delta_rot_deg_);
+        if (!ndt_res.valid) continue;
+        if (!found || ndt_res.confidence > best_ndt.confidence) {
+            best_ndt = ndt_res;
+            found = true;
+        }
+    }
+
+    if (!found) {
+        LOG(INFO) << "[KISS-Reloc] yaw refine: no NDT-valid pose across ±" << yaw_refine_range_deg_
+                  << "@" << yaw_refine_step_deg_ << " deg sweep (KISS coarse rejected)";
+        return result;
+    }
+
+    // 接受: pose = 最佳 NDT 解 (yaw 微扫的 NDT 已是精修 + 二次闸).
+    result.valid = true;
+    result.pose = best_ndt.pose;
+    result.score = static_cast<double>(kiss_res.final_inliers);
+    result.kf_id = -1;
+    result.source = manual ? "manual_kiss" : "kiss";
+    debug_.best = result;
+
+    LOG(INFO) << "[KISS-Reloc] accepted: pos=[" << result.pose.translation().x() << ", "
+              << result.pose.translation().y() << ", " << result.pose.translation().z()
+              << "], TP=" << best_ndt.confidence << ", final_inl=" << kiss_res.final_inliers
+              << (manual ? " (manual)" : "");
     return result;
 }
 

@@ -85,16 +85,67 @@ Do not add these to the package unless a later task explicitly changes scope:
   conflicts with the package's embedded scope — unresolved, do not add without
   an explicit user decision)
 - OpenCV highgui
-- KISS-Matcher as a default runtime capability
 - miao optimizer
 - g2o
 
+KISS-Matcher was previously disallowed but is **now the default relocalization
+backend** (see "KISS-Matcher" below and `runtime-and-relocalization.md` §
+Relocalization Backend Selector). User-approved 2026-06-16: embedded
+relocalization benefit > dependency cost, same precedent as the Pangolin scope
+decision. It is a one-shot bounded query (no persistent worker thread), so the
+"no persistent SC/KISS background threads" scope rule still holds.
+
 Do not link `lightning.libs`. Extract small, necessary algorithm files instead.
+
+## KISS-Matcher
+
+Vendored global point-cloud registration for cold-start / manual
+relocalization (coarse 6DOF, no initial guess). Default ON; the whole feature
+is behind `option(USE_KISS_MATCHER ON)` so it can be compiled out (callers
+degrade to an invalid result via `#ifdef USE_KISS_MATCHER`).
+
+### Integration contract (CMakeLists.txt)
+
+This is the contract that keeps colcon's two-pass configure + SHARED-into-STATIC
+link working — replicate it exactly if the wiring is touched:
+
+- `add_compile_definitions(USE_KISS_MATCHER)` when ON; the wrapper
+  (`src/reloc/kiss_global_matcher.cpp`) and every caller `#ifdef`-guard on it.
+- `set(CMAKE_POSITION_INDEPENDENT_CODE ON)` **before** `add_subdirectory` of the
+  vendored tree. `hikari_loclite_core` is SHARED; the KISS/ROBIN/PMC static libs
+  link into it, so without PIC you get
+  `relocation R_X86_64_PC32 ... recompile with -fPIC`.
+- `if(NOT kiss_matcher_FOUND AND NOT TARGET kiss_matcher::kiss_matcher_core)`
+  idempotency guard around `add_subdirectory` — colcon configures twice and the
+  KISS `kiss_matcher::kiss_matcher_core` ALIAS has no internal TARGET guard, so a
+  second `add_subdirectory` would throw `duplicate ALIAS`.
+- robin-missing fix: `find_package(robin)` **before** `find_package(kiss_matcher)`
+  when `kiss_matcher_DIR` is cached — the installed `kiss_matcherConfig.cmake`
+  omits `find_dependency(robin)` and would otherwise leave `robin::robin`
+  permanently missing on incremental/cascade rebuilds.
+- Link guarded: `target_link_libraries(... kiss_matcher::kiss_matcher_core)` only
+  `if(USE_KISS_MATCHER AND TARGET kiss_matcher::kiss_matcher_core)`.
+- `USE_SYSTEM_TBB ON` (image ships TBB; runtime needs `libtbb.so.12` present),
+  `USE_SYSTEM_ROBIN OFF` (KISS sub-build FetchContent pulls ROBIN v1.2.7, which
+  internally pins PMC@4bbd40a). FetchContent for ROBIN/PMC/xenium needs
+  build-time network.
+
+### Transitive dependencies (all permissive)
+
+KISS-Matcher (vendored v1.0.2) brings ROBIN, PMC, TEASER++, TBB, flann, lz4 —
+all permissive (MIT/BSD/Apache-2.0). Acceptable for embedded deployment.
+
+> **Do not** add include paths into `KISS-Matcher/ros/` — that wrapper binds
+> gtsam / visualization_msgs / pcl_ros. Only the `cpp/kiss_matcher` core is
+> vendored and built.
 
 ## Third-Party Code
 
 - `thirdparty/nanoflann` is the local dependency for Scan Context ring-key
   search.
+- `thirdparty/3rd/KISS-Matcher/` is the vendored KISS-Matcher v1.0.2 core
+  (`.git`/`ros`/`python`/`examples` excluded); built via `add_subdirectory`, not
+  linked from a sibling package. See "KISS-Matcher" above for the CMake contract.
 - `thirdparty/Sophus` is vendored into this package so `hikari_loclite` does not
   include headers from another ROS package.
 - iVox lives in `include/hikari_loclite/ivox3d/`.
