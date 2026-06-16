@@ -139,6 +139,34 @@ all permissive (MIT/BSD/Apache-2.0). Acceptable for embedded deployment.
 > gtsam / visualization_msgs / pcl_ros. Only the `cpp/kiss_matcher` core is
 > vendored and built.
 
+### Gotcha: .deb packaging vs PMC `-Werror` (format hardening)
+
+Plain colcon builds the KISS subtree fine, but the `.deb` path
+(`build.sh` → `docker2/Dockerfile` → bloom-generated `debian/rules` →
+`dh_auto_build`) fails in PMC with:
+
+```
+cc1plus: error: '-Wformat-security' ignored without '-Wformat' [-Werror=format-security]
+```
+
+Cause: debhelper's `dh_auto_configure` injects Debian hardening flags
+(`-Wformat -Werror=format-security`) via `dpkg-buildflags`; PMC (FetchContent'd
+through ROBIN, **not in our tree**) adds `-Wno-format`, which cancels `-Wformat`
+and leaves `-Werror=format-security` fatally complaining. The trailing
+`[-Werror=format-security]` tag confirms the *Debian format hardening* is the
+controlling flag, not PMC's own generic `-Werror`.
+
+Fix (in `docker2/Dockerfile`, alongside the other `debian/rules` seds):
+
+```
+sed -i '1a export DEB_BUILD_MAINT_OPTIONS = hardening=-format' debian/rules
+```
+
+This drops only the *format* hardening feature for the whole package build,
+removing the conflict; fortify/stackprotector/relro stay on. PMC then compiles
+exactly as it does under colcon. The same fix covers any vendored `-Werror` lib
+that uses `-Wno-format` (TEASER, ROBIN). Verified: arm64 `.deb` builds green.
+
 ## Third-Party Code
 
 - `thirdparty/nanoflann` is the local dependency for Scan Context ring-key

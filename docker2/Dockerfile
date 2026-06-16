@@ -107,6 +107,7 @@ RUN /bin/bash -c "set -eo pipefail && \
     \
     sed -i 's|dh_auto_configure --|dh_auto_configure -- -DCMAKE_BUILD_TYPE=Release|' debian/rules && \
     sed -i \"s|^\\([[:space:]]*\\)dh_auto_build$|\\1dh_auto_build -- -j${BUILD_JOBS}|\" debian/rules && \
+    sed -i '1a export DEB_BUILD_MAINT_OPTIONS = hardening=-format' debian/rules && \
     python3 docker2/inject_control_dep.py debian/control \"ros-${ROS_DISTRO}-livox-ros-driver2\" && \
     printf '\noverride_dh_usrlocal:\n\ttrue\n' >> debian/rules && \
     \
