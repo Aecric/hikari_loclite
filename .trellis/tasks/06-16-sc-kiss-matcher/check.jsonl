@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "验收总检查表与禁止模式"}
+{"file": ".trellis/spec/backend/build-and-dependencies.md", "reason": "核验 vendor 方式/CMake USE_KISS_MATCHER 守卫/未链 lightning.libs/未引 KISS ros wrapper/依赖与许可证、CLAUDE.md 禁令已更新"}
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "核验 KISS 重定位未回归状态机/触发流, ResetToMapPose 仅在 NDT 验证后"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "核验 inlier 闸/NDT 闸的拒绝是正常控制流、验证前不污染 Fast-LIO、R 正交化防 Sophus 断言"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "核验移植代码无残留 glog、日志限频"}
+{"file": ".trellis/tasks/06-16-sc-kiss-matcher/research/kiss-matcher-integration.md", "reason": "核验集成是否符合调研的 API 用法(双 inlier 闸/R 正交化)、未触发大图护栏、SC 彻底移除"}

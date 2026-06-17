@@ -6,7 +6,7 @@
 #   ./build.sh
 #
 # Useful overrides:
-#   ROS_DISTRO=humble  UBUNTU_CODENAME=jammy     ./build.sh
+#   ROS_DISTRO=humble  UBUNTU_CODENAME=jammy TARGETARCH=arm64  BUILD_JOBS=12   ./build.sh
 #   ROS_DISTRO=jazzy   UBUNTU_CODENAME=noble     ./build.sh
 #   TARGETARCH=amd64  ./build.sh
 #   TARGETARCH=arm64  ./build.sh

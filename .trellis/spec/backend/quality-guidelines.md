@@ -20,8 +20,9 @@ checks instead of a full ROS2 build. For C++ changes, build at minimum.
 ## Forbidden Patterns
 
 - Do not link `lightning.libs`.
-- Do not add Pangolin, OpenCV highgui, KISS-Matcher, miao optimizer, g2o,
-  `rosbag2_cpp`, or `visualization_msgs` to the first-version runtime.
+- Do not add Pangolin, OpenCV highgui, miao optimizer, g2o, `rosbag2_cpp`, or
+  `visualization_msgs` to the first-version runtime. KISS-Matcher is the default
+  relocalization backend (user-approved 2026-06-16, see `build-and-dependencies.md`).
 - Do not add PGO, dynamic maps, Pangolin UI, full LidarLoc state machine, or
   permanent SC/KISS background workers.
 - Do not let current scan points grow the fixed map in fixed-map tracking.

@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "完成前质量基线核对"}
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "核对状态机转换 / TF 冻结 / LOST 恢复是否符合运行时契约"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "核对失败分支与防御性处理"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "核对新增日志规范"}

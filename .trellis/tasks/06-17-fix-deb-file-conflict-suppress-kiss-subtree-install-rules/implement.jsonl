@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/build-and-dependencies.md", "reason": "本任务核心: CMake/vendored 第三方库接线 + .deb 打包规程; KISS add_subdirectory 与 install 规则、容器 ARM64 Release 构建出处"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "确认 KISS vendored 落点(thirdparty/3rd/KISS-Matcher) 与顶层 CMakeLists install 段(run_loclite_*/config/launch/service.in)的边界, 改动不得波及"}

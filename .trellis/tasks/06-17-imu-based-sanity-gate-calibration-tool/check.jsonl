@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "完成前质量基线核对"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "核对工具归位与不污染 colcon 构建"}

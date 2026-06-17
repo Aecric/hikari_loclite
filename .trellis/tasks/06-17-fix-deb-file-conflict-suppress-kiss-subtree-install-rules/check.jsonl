@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/build-and-dependencies.md", "reason": "核对 CMake/打包改动符合 vendored 依赖与 .deb 规程; 验证 dpkg-deb -c 无 KISS/ROBIN/PMC dev 文件、干净 dpkg -i"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "改动最小化、不引回归(USE_KISS_MATCHER/幂等守卫/PIC 保持)、注释中文风格一致性核对"}

@@ -1,0 +1,8 @@
+{"file": ".trellis/tasks/06-16-sc-kiss-matcher/research/kiss-matcher-integration.md", "reason": "核心集成蓝图: KISS API/inlier闸/R正交化、可抄的 lightning wrapper+CMake 接线出处(file:line)、vendor 依赖清单与踩坑、大图护栏。P1-P3 全程对照"}
+{"file": ".trellis/spec/backend/build-and-dependencies.md", "reason": "P1 vendor 第三方库进 thirdparty/ + CMake(USE_KISS_MATCHER 守卫)、容器 ARM64 Release 构建规程、不链 lightning.libs、依赖膨胀与 CLAUDE.md 禁令重评"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "新文件落点(thirdparty/KISS-Matcher、src/reloc/kiss_global_matcher)、删 scan_context.* 的模块归属、forbidden includes、命名空间 hikari::loclite"}
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "RelocManager arm/disarm、ResetToMapPose、init/手动触发与状态机交互; KISS 替换 SC 须不回归现有重定位流"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "RelocCandidate 有效性结构、NDT 验证通过前不得 reset Fast-LIO、低置信干净拒绝(inlier 闸)而非异常"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "移植 lightning RunKiss 时 glog→RCLCPP_*、热点限频; KISS 各段耗时打印按预算"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "本任务正是'从 lightning-lm 复制代码'+新增 yaml knob 的典型, 须按指南先 rg 查既有引用避免错配"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "候选位姿跨 KISS→yaw微扫→NDT→ResetToMapPose 多模块流动, 涉及 level/重力对齐/frame, 典型 cross-layer"}

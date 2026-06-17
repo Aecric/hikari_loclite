@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "新增独立工具放 scripts/ 的归位约定 (照 scripts/zupt_calib 先例, 不进 colcon)"}
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "标定对象是 sanity_gate 与 /hikari_loc/odom 话题契约, 工具行为须与运行时一致"}

@@ -85,6 +85,11 @@ if(USE_KISS_MATCHER)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
     message(STATUS "KISS-Matcher: building vendored source at ${HIKARI_KISS_MATCHER_SOURCE_DIR}")
+    # KISS 静态链入本包可执行/共享库. 但其上游 CMakeLists(及 FetchContent 引入的 ROBIN/PMC/
+    # xenium)自带 install(TARGETS/EXPORT/DIRECTORY), 会把 .a / 头文件 / cmake 导出装进 install
+    # prefix, 与 lightning vendored 的同名 KISS 文件撞包 (dpkg "trying to overwrite ... FasterPFH.cpp").
+    # 实测 CMAKE_SKIP_INSTALL_RULES 无法穿透 FetchContent 子树 → 改在文件末尾用 install(CODE)
+    # 按确切 dest 善后清除(见下方 "strip vendored KISS-Matcher dev artifacts").
     add_subdirectory(
       ${HIKARI_KISS_MATCHER_SOURCE_DIR}
       ${CMAKE_BINARY_DIR}/_deps/kiss_matcher-build)
@@ -203,5 +208,38 @@ install(DIRECTORY config launch
 install(FILES docker2/hikari-loclite.service.in
   DESTINATION share/${PROJECT_NAME}/systemd
 )
+
+# --- strip vendored KISS-Matcher dev artifacts ---
+# vendored KISS 子树(KISS core + FetchContent 的 ROBIN/PMC/xenium)被静态链入本包, 运行期
+# 用不到其 dev 产物; 但其上游 install 规则会把这些文件装进 prefix, 与 lightning vendored 的
+# 同一份 KISS 撞包(dpkg overwrite error). CMAKE_SKIP_INSTALL_RULES 无法穿透 FetchContent 子树,
+# 故在所有 install 规则之后(子目录 install 在 add_subdirectory 处执行, 本 install(CODE) 位于
+# 文件末尾必在其后)按确切 dest 清除. 三处坑:
+#   * 用 GNUInstallDirs 的 CMAKE_INSTALL_LIBDIR/INCLUDEDIR —— .deb 经 dh_auto_configure 传入
+#     Debian multiarch libdir(arm64=lib/aarch64-linux-gnu), 硬编码 "lib" 会漏删 lib/<triplet>
+#     下的 .a 与 cmake 导出; 本机 colcon(无 -D) 回落默认 "lib".
+#   * file(REMOVE) 不认 DESTDIR → 用 $ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}, 否则 .deb 经 DESTDIR
+#     暂存安装时会误删构建机真实 /opt/ros 路径.
+#   * 仅删 KISS 子树确切产物(不 blanket 删 include/ 或 lib/*.a), 防 --merge-install/共享前缀波及他包.
+# string(CONFIGURE @ONLY) 在 configure 期把 @CMAKE_INSTALL_*@ 替死, 同时让 $ENV{DESTDIR} 与
+# ${CMAKE_INSTALL_PREFIX} 保持字面量推迟到 install 期求值.
+include(GNUInstallDirs)
+string(CONFIGURE [[
+  set(_hikari_kiss_strip_root "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}")
+  file(REMOVE_RECURSE
+    "${_hikari_kiss_strip_root}/@CMAKE_INSTALL_INCLUDEDIR@/kiss_matcher"
+    "${_hikari_kiss_strip_root}/@CMAKE_INSTALL_INCLUDEDIR@/robin"
+    "${_hikari_kiss_strip_root}/@CMAKE_INSTALL_INCLUDEDIR@/pmc"
+    "${_hikari_kiss_strip_root}/@CMAKE_INSTALL_INCLUDEDIR@/xenium"
+    "${_hikari_kiss_strip_root}/@CMAKE_INSTALL_LIBDIR@/cmake/kiss_matcher"
+    "${_hikari_kiss_strip_root}/@CMAKE_INSTALL_LIBDIR@/cmake/robin"
+    "${_hikari_kiss_strip_root}/@CMAKE_INSTALL_LIBDIR@/cmake/pmc"
+    "${_hikari_kiss_strip_root}/@CMAKE_INSTALL_LIBDIR@/cmake/xenium"
+    "${_hikari_kiss_strip_root}/@CMAKE_INSTALL_LIBDIR@/libkiss_matcher_core.a"
+    "${_hikari_kiss_strip_root}/@CMAKE_INSTALL_LIBDIR@/librobin.a"
+    "${_hikari_kiss_strip_root}/@CMAKE_INSTALL_LIBDIR@/libpmc.a")
+  message(STATUS "hikari_loclite: stripped vendored KISS-Matcher dev artifacts from ${_hikari_kiss_strip_root}")
+]] _hikari_kiss_strip_code @ONLY)
+install(CODE "${_hikari_kiss_strip_code}")
 
 ament_package()

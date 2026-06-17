@@ -18,6 +18,12 @@
 - `include/hikari_loclite/log.h` is the local logging shim that replaces glog.
 - `thirdparty/nanoflann/` is the local nearest-neighbor dependency used by Scan
   Context.
+- `thirdparty/3rd/KISS-Matcher/` is the vendored KISS-Matcher v1.0.2 core for
+  global point-cloud registration (built via `add_subdirectory`, see
+  `build-and-dependencies.md`).
+- `src/reloc/` holds `reloc_manager.{hpp,cpp}` (backend selector, SC/KISS
+  dispatch, accumulation, gravity-align) and `kiss_global_matcher.{hpp,cpp}`
+  (KISS-Matcher wrapper with inlier gates and R orthonormalization).
 
 The build document defines the intended product layout for upcoming system code:
 `src/app/` for executables, `src/system/` for ROS2 orchestration, `src/lio/` for

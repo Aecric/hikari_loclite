@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "改 LOST 进入条件 / TF 发布 / 状态机转换 / reloc 恢复路径前必读, 本任务核心"}
+{"file": ".trellis/spec/backend/localization-architecture.md", "reason": "NDT validation → ResetToMapPose 恢复链与固定图 Fast-LIO 规则, NDT 局部恢复先验依据"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "硬 LOST 触发与冻结/恢复失败分支的处理约定"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "新增触发/冻结/恢复日志须符合 RCLCPP 日志规范"}
