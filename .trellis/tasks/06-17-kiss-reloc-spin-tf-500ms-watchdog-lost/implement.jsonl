@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "reloc/watchdog/state-machine 运行时契约——异步化必须保持 init/LOST/manual 行为与门限语义"}
+{"file": ".trellis/spec/backend/localization-architecture.md", "reason": "LocLiteNode/RelocManager/NdtCorrector 组件边界与单线程模型——确定 worker/主线程切分"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "编码规范 + 嵌入式 CPU/内存预算（独立 NDT 实例的内存代价）"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "worker 失败/陈旧候选/gen 不匹配等异常路径处理约定"}
+{"file": ".trellis/spec/backend/build-and-dependencies.md", "reason": "依赖策略（std::thread/async 不引新依赖）+ 容器内 jazzy 构建"}
+{"file": ".trellis/tasks/06-17-kiss-reloc-spin-tf-500ms-watchdog-lost/research/threading-boundary.md", "reason": "本任务核心：RunKissOnce 拆解、accum_buffer_ 竞争点、独立 NDT/MatchGlobal 安全性结论与落地线程边界"}

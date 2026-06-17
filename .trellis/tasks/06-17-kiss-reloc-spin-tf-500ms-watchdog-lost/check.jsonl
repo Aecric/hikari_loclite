@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "对照编码规范 + 资源预算复核"}
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "复核重定位/看门狗运行时行为未退化"}
+{"file": ".trellis/spec/backend/localization-architecture.md", "reason": "复核组件边界/线程切分一致性"}
+{"file": ".trellis/tasks/06-17-kiss-reloc-spin-tf-500ms-watchdog-lost/research/threading-boundary.md", "reason": "复核实现是否守住线程边界与无数据竞争结论"}

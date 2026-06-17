@@ -467,20 +467,16 @@ RelocCandidate RelocManager::RunScanContextOnce(const CloudPtr& scan, const SE3&
     return result;
 }
 
-RelocCandidate RelocManager::RunKissOnce(const CloudPtr& scan, const SE3& current_imu_pose, bool manual,
-                                         NdtCorrector* ndt) {
-    RelocCandidate result;
-    result.kf_id = -1;
+CloudPtr RelocManager::PrepareKissQueryLevel(const CloudPtr& scan, const SE3& current_imu_pose,
+                                             bool manual) {
+    // 异步 KISS 的「主线程」一半: 读 accum_buffer_ (与逐帧 AccumulateScan 同锁) 构造 level 系查询云快照.
+    // 真正的重活 (MatchGlobal + yaw 微扫) 交给 MatchKissOnSnapshot 在工作线程跑, 不碰这里的共享缓冲.
     debug_ = ScDebugInfo{};
     last_query_cloud_.reset();
 
     if (!kiss_.TargetReady()) {
         LOG_EVERY_T(WARNING, 5.0) << "[KISS-Reloc] target not ready (SetKissTarget first), skip";
-        return result;
-    }
-    if (!ndt) {
-        LOG(ERROR) << "[KISS-Reloc] NDT corrector null, cannot refine/validate, skip";
-        return result;
+        return nullptr;
     }
 
     // Step 1: 构造查询点云 — 复用 SC 路径同款滚动累积 (单帧太稀, 倾斜安装下特征不稳定)
@@ -496,14 +492,14 @@ RelocCandidate RelocManager::RunKissOnce(const CloudPtr& scan, const SE3& curren
         } else {
             LOG(INFO) << "[KISS-Reloc] accumulating frames=" << accum_frames << "/" << sc_accum_frames_
                       << ", skipping this attempt";
-            return result;
+            return nullptr;
         }
     } else {
         query_cloud = scan;
     }
     if (!query_cloud || query_cloud->empty()) {
         LOG(WARNING) << "[KISS-Reloc] query cloud empty, skip";
-        return result;
+        return nullptr;
     }
 
     // Step 2: 重力对齐到水平 (level) 系 (去 roll/pitch 倾斜); KISS target 是固定地图 (map 系),
@@ -511,11 +507,35 @@ RelocCandidate RelocManager::RunKissOnce(const CloudPtr& scan, const SE3& curren
     CloudPtr cloud_level = GravityAlignCloud(query_cloud, current_imu_pose);
     last_query_cloud_ = cloud_level;
 
-    LOG(INFO) << "[KISS-Reloc] query: accum_frames=" << accum_frames
+    LOG(INFO) << "[KISS-Reloc] query prepared: accum_frames=" << accum_frames
               << ", query_points=" << cloud_level->size() << (manual ? " (manual)" : "");
+    return cloud_level;
+}
+
+RelocCandidate RelocManager::RunKissOnce(const CloudPtr& scan, const SE3& current_imu_pose, bool manual,
+                                         NdtCorrector* ndt) {
+    // 同步组合 (保留供 TryRelocalize/ManualRelocalize 的旧调用面); 在线/离线节点改走
+    // PrepareKissQueryLevel + 工作线程 MatchKissOnSnapshot 的异步路径, 不在 spin 线程上阻塞.
+    CloudPtr query_level = PrepareKissQueryLevel(scan, current_imu_pose, manual);
+    if (!query_level) return {};
+    return MatchKissOnSnapshot(query_level, scan, current_imu_pose, ndt, manual);
+}
+
+RelocCandidate RelocManager::MatchKissOnSnapshot(const CloudPtr& query_level, const CloudPtr& scan,
+                                                 const SE3& current_imu_pose, NdtCorrector* ndt,
+                                                 bool manual) const {
+    // 异步 KISS 的「worker 线程」一半: 只读 kiss_/yaw_refine_*/reloc_max_delta_*, 用 caller 独占的 ndt 做
+    // yaw 微扫 Validate, 不写任何成员. 配合"至多一个在飞 worker + 独立 ndt 实例"约束, 工作线程调用安全.
+    RelocCandidate result;
+    result.kf_id = -1;
+    if (!query_level || query_level->empty()) return result;
+    if (!ndt) {
+        LOG(ERROR) << "[KISS-Reloc] NDT corrector null, cannot refine/validate, skip";
+        return result;
+    }
 
     // Step 3: KISS estimate (无需初值的粗 6DOF) + inlier 闸 (在 wrapper 内做)
-    const auto kiss_res = kiss_.MatchGlobal(cloud_level);
+    const auto kiss_res = kiss_.MatchGlobal(query_level);
     if (!kiss_res.valid) {
         LOG(INFO) << "[KISS-Reloc] KISS estimate invalid (no match / inliers below gate)";
         return result;
@@ -569,7 +589,6 @@ RelocCandidate RelocManager::RunKissOnce(const CloudPtr& scan, const SE3& curren
     result.score = static_cast<double>(kiss_res.final_inliers);
     result.kf_id = -1;
     result.source = manual ? "manual_kiss" : "kiss";
-    debug_.best = result;
 
     LOG(INFO) << "[KISS-Reloc] accepted: pos=[" << result.pose.translation().x() << ", "
               << result.pose.translation().y() << ", " << result.pose.translation().z()

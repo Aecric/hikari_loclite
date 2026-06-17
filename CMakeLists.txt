@@ -40,6 +40,8 @@ find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED COMPONENTS common io filters registration kdtree)
 find_package(yaml-cpp REQUIRED)
 find_package(OpenMP)
+# 异步 KISS 重定位 worker (std::async) + 工作线程降优先级 (pthread_setschedparam) 需显式链接 pthread
+find_package(Threads REQUIRED)
 
 # --- KISS-Matcher (vendored global registration) ---
 # 模式照搬 lightning (src/lightning-lm/CMakeLists.txt:71-139): 优先系统包, 否则
@@ -136,6 +138,7 @@ ament_target_dependencies(${PROJECT_NAME}_core
 target_link_libraries(${PROJECT_NAME}_core
   yaml-cpp
   ${PCL_LIBRARIES}
+  Threads::Threads
 )
 
 if(OpenMP_CXX_FOUND)

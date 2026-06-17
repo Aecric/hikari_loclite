@@ -70,6 +70,11 @@ class RelocManager {
     }
     double ScCooldownSec() const { return sc_cooldown_sec_; }
     double MaxRuntimeSec() const { return max_runtime_sec_; }
+    /// armed 已持续多久 (wall 秒); 未 armed 或无 arm_ts 返回 -1. 供异步 KISS 路径 (绕过 TryRelocalize
+    /// 内置的 max_runtime 检查) 自行判定是否超 MaxRuntimeSec 而 Disarm.
+    double ArmedElapsed(double current_time) const {
+        return (Armed() && arm_ts_ > 0.0 && current_time > 0.0) ? current_time - arm_ts_ : -1.0;
+    }
     bool DisableAfterGood() const { return disable_after_good_; }
 
     /// 候选 NDT 验证专用 delta 门限 (传给 NdtCorrector::Validate 覆盖 ndt.max_delta_*):
@@ -96,6 +101,20 @@ class RelocManager {
 
     /// Request a manual relocalization attempt (bypasses blackout, cooldown, and runtime limit).
     RelocCandidate ManualRelocalize(const CloudPtr& scan, const SE3& current_imu_pose, NdtCorrector* ndt);
+
+    /// 异步 KISS 重定位的「主线程」一半 (KISS backend 专用): 在调用方持锁的前提下读 accum_buffer_
+    /// 构造 level 系查询点云快照 (合并 + 重力对齐), 顺带更新 last_query_cloud_ (debug 用).
+    /// 返回 nullptr 表示帧数不足 (调用方据此不消耗 cooldown) 或查询云为空; manual=true 时帧数不足回退单帧.
+    /// 与 MatchKissOnSnapshot 配对, 把读共享缓冲 (主线程) 与跑重活 (worker) 隔开.
+    CloudPtr PrepareKissQueryLevel(const CloudPtr& scan, const SE3& current_imu_pose, bool manual);
+
+    /// 异步 KISS 重定位的「worker 线程」一半 (KISS backend 专用): 在 PrepareKissQueryLevel 产出的
+    /// query_level 快照上跑 KISS 全局配准 + yaw 微扫 (用 caller 独占的 ndt 实例做 Validate).
+    /// **线程安全约定**: 只读 kiss_/yaw_refine_*/reloc_max_delta_* 等 init 后不变的成员, 不写任何成员;
+    /// 配合"同一时刻至多一个在飞 worker + 独立 ndt 实例"的调用约束, 可安全地在工作线程调用.
+    /// scan 为派发时快照的当前帧去畸变云 (yaw 微扫 NDT Validate 用).
+    RelocCandidate MatchKissOnSnapshot(const CloudPtr& query_level, const CloudPtr& scan,
+                                       const SE3& current_imu_pose, NdtCorrector* ndt, bool manual) const;
 
     /// armed 期间逐帧调用: 体素降采样后的 deskewed scan (lidar 系) + 对应 LIO lidar 位姿入环形缓冲.
     /// 每帧开销仅为降采样 + 入队; 合并/重力对齐/查询只在 SC 尝试节奏 (cooldown) 内发生.
