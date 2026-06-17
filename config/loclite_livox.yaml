@@ -111,6 +111,9 @@ runtime:
   publish_odom: true                    # hikari_loc/odom
   publish_path: true                    # hikari_loc/path (0.1s 节流, 上限 5000; 契约接口默认开启)
   publish_pcdmap: true                 # 是否发布 /pcdmap: 原始 global.pcd 按 fixed_map.voxel_leaf 降采样后发布到 map frame, 供定位匹配验证
+  imu_extrapolate_tf: true              # IMU 回调中短时外推 map→base TF; odom 仍保持 lidar-rate
+  imu_extrapolate_max_dt_sec: 0.03      # 单步 IMU dt 上限; 超过则等下一帧 lidar 重新 seed
+  imu_extrapolate_max_ahead_sec: 0.15   # 相对最近 lidar 校正最多外推多久; 防长时间无雷达时惯性漂移污染 TF
 
   # ==== 输入掉线 watchdog + 富状态上报 (Phase6 产品化) ====
   # 独立 ~5Hz timer: 检测 IMU/Lidar 静默 (node clock 域, 不与 scan ts 跨域比较).

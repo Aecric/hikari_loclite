@@ -1074,7 +1074,7 @@ void LocLiteNode::MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, dou
 }
 
 void LocLiteNode::PublishMapToBaseTF(const SE3& T_map_lidar, const rclcpp::Time& stamp) {
-    if (publish_tf_) {
+    if (publish_tf_ && tf_pub_) {
         const SE3 T_map_base = T_map_lidar * T_lidar_base_;
         geometry_msgs::msg::TransformStamped tf_msg;
         tf_msg.header.stamp = stamp;
@@ -1111,6 +1111,8 @@ void LocLiteNode::SeedImuTfExtrapolator(const NavState& state) {
     imu_tf_extrapolated_state_ = state;
     imu_tf_last_lidar_ts_ = state.timestamp_;
     imu_tf_last_publish_ts_ = state.timestamp_;
+    imu_tf_last_gyro_.setZero();
+    imu_tf_has_last_gyro_ = false;
     imu_tf_extrapolator_valid_ = true;
 }
 
@@ -1158,13 +1160,14 @@ void LocLiteNode::MaybePublishImuExtrapolatedTF(const sensor_msgs::msg::Imu& msg
     }
 
     NavState next = imu_tf_extrapolated_state_;
-    const Vec3d gyro(msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z);
-    const Vec3d acc(msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z);
-    const Vec3d omega = gyro - next.bg_;
-    const Vec3d acc_map = next.rot_ * acc + next.grav_;
+    const Vec3d gyro_now(msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z);
+    const Vec3d gyro_avg = imu_tf_has_last_gyro_ ? 0.5 * (imu_tf_last_gyro_ + gyro_now) : gyro_now;
+    const Vec3d omega = gyro_avg - next.bg_;
 
-    next.pos_ += next.vel_ * dt + 0.5 * acc_map * dt * dt;
-    next.vel_ += acc_map * dt;
+    // Humanoid footstep vibration makes raw acceleration unsafe for publication-only
+    // position extrapolation. Keep translation constant-velocity from the last
+    // lidar-corrected state; lidar/NDT remains authoritative for position.
+    next.pos_ += next.vel_ * dt;
     next.rot_ = next.rot_ * math::exp(omega, dt);
     next.timestamp_ = imu_ts;
 
@@ -1172,6 +1175,8 @@ void LocLiteNode::MaybePublishImuExtrapolatedTF(const sensor_msgs::msg::Imu& msg
     PublishMapToBaseTF(T_map_lidar, ToRosTime(imu_ts));
     imu_tf_extrapolated_state_ = next;
     imu_tf_last_publish_ts_ = imu_ts;
+    imu_tf_last_gyro_ = gyro_now;
+    imu_tf_has_last_gyro_ = true;
 }
 
 void LocLiteNode::PublishPose(const NavState& state) {
@@ -1213,7 +1218,6 @@ void LocLiteNode::PublishPose(const NavState& state) {
 
 void LocLiteNode::PublishPose(const SE3& T_map_lidar, double ts) {
     const rclcpp::Time stamp = ToRosTime(ts);
-    const SE3 T_map_base = T_map_lidar * T_lidar_base_;
     marker_pose_ = T_map_lidar;
     imu_tf_extrapolator_valid_ = false;
 

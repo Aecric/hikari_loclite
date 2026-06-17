@@ -325,3 +325,77 @@ section (each key falls back to the struct default if absent):
 > GOOD-state job** — it must trip degradation detection (residual + NDT TP/divergence)
 > into Degraded/Lost and hand off to SC relocalization, not be chased by a bigger
 > GOOD-state nudge.
+
+## Scenario: IMU-Extrapolated TF Publishing
+
+### 1. Scope / Trigger
+
+- Trigger: reduce downstream `map -> base_frame_id` TF latency between lidar
+  frames without changing Fast-LIO's authoritative ESKF state.
+- Owner: `LocLiteNode`, because this is a ROS publication policy, not a fixed-map
+  tracking update.
+
+### 2. Signatures
+
+- YAML keys under `runtime`:
+  - `imu_extrapolate_tf: bool`
+  - `imu_extrapolate_max_dt_sec: double`
+  - `imu_extrapolate_max_ahead_sec: double`
+- Output: existing TF `common.map_frame_id -> system.base_frame_id`.
+- Non-output: `hikari_loc/odom` remains lidar-rate unless a later task changes
+  that contract explicitly.
+
+### 3. Contracts
+
+- Seed the extrapolator only from accepted lidar-rate `NavState` publication.
+- IMU callback may publish extrapolated TF, but must not mutate `FastLioFixedMap`,
+  `ESKF`, fixed maps, NDT, or relocalization state.
+- Use gyro-only attitude extrapolation with bias from the latest trusted LIO
+  state. Use adjacent IMU gyro averaging when a previous IMU sample exists,
+  matching Fast-LIO's propagation style.
+- Translation is constant-velocity from the latest trusted LIO state. Do **not**
+  double-integrate raw acceleration for publication-only position output.
+- Lidar/NDT output remains authoritative and re-seeds the extrapolator every
+  trusted lidar frame.
+
+### 4. Validation & Error Matrix
+
+- No trusted lidar seed -> do not publish extrapolated TF.
+- State is `Lost`, `WaitForInitialPose`, `Uninitialized`, or pose is frozen ->
+  invalidate extrapolator and do not publish extrapolated TF.
+- IMU timestamp repeats or goes backward -> skip; if it rolls behind the cached
+  state timestamp, invalidate until the next lidar seed.
+- `imu_dt > imu_extrapolate_max_dt_sec` -> invalidate until next lidar seed.
+- `imu_ts - last_lidar_seed_ts > imu_extrapolate_max_ahead_sec` -> invalidate
+  until next lidar seed.
+
+### 5. Good/Base/Bad Cases
+
+- Good: `Good`/`Initializing`/`Degraded` after a trusted lidar output, fresh IMU
+  arrives at 100-400 Hz -> publish TF at IMU cadence with bounded short-horizon
+  extrapolation.
+- Base: feature disabled -> existing lidar-rate TF behavior is unchanged.
+- Bad: LOST/frozen pose or lidar dropout -> do not keep publishing inertial-only
+  drift as localization truth.
+
+### 6. Tests Required
+
+- Static check: `git diff --check`.
+- Build: run the Docker/Jazzy build command from `quality-guidelines.md`.
+- Runtime smoke when a bag or robot is available: enable
+  `runtime.imu_extrapolate_tf`, echo `/tf`, and verify `map -> base_frame_id`
+  stamps advance at IMU cadence while `hikari_loc/odom` stays lidar-rate.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Using raw humanoid IMU acceleration in the ROS IMU callback as
+`pos += vel*dt + 0.5*a*dt^2`; footstep vibration is not filtered by the full
+Fast-LIO measurement window there and will show up as TF jitter.
+
+#### Correct
+
+Use gyro+bias for attitude and constant-velocity translation for the short
+publication window; let the next lidar/NDT update correct position and re-seed
+the extrapolator.

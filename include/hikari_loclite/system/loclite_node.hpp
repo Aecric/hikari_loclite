@@ -99,7 +99,7 @@ class LocLiteNode : public rclcpp::Node {
     void PublishMapToBaseTF(const SE3& T_map_lidar, const rclcpp::Time& stamp);
     /// 雷达帧可信输出后 seed IMU 外推 TF 状态
     void SeedImuTfExtrapolator(const NavState& state);
-    /// 每条 IMU 后短时外推并发布 map→base_link TF (不改 LIO/ESKF 状态)
+    /// 每条 IMU 后短时外推并发布 map→base_link TF (gyro 姿态 + 常速平移; 不改 LIO/ESKF 状态)
     void MaybePublishImuExtrapolatedTF(const sensor_msgs::msg::Imu& msg);
     bool ImuTfExtrapolationStateAllowsPublish() const;
     /// loc_state + ndt_status + loc_status marker
@@ -151,6 +151,8 @@ class LocLiteNode : public rclcpp::Node {
     NavState imu_tf_extrapolated_state_;
     double imu_tf_last_lidar_ts_ = -1.0;           // 最近一次 lidar-rate seed 的 scan 时间
     double imu_tf_last_publish_ts_ = -1.0;         // 最近一次 map→base TF stamp, 防 TF_REPEATED_DATA/回退
+    Vec3d imu_tf_last_gyro_ = Vec3d::Zero();       // 相邻 IMU gyro 均值用, 对齐 Fast-LIO 传播风格
+    bool imu_tf_has_last_gyro_ = false;
 
     // --- 输入掉线 watchdog + 富状态上报 (runtime.*) ---
     bool watchdog_enabled_ = true;       // runtime.watchdog_enabled: IMU/Lidar 掉线检测

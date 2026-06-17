@@ -6,10 +6,12 @@ budget and keep dependencies explicit.
 
 ## Required Checks
 
-From the workspace root:
+Build C++ changes in the project Docker image, not directly on the host. The
+container workspace root is `/root/slam_ws` and the source tree is selected with
+`--base-path src/`:
 
 ```bash
-colcon build --packages-select hikari_loclite --cmake-args -DCMAKE_BUILD_TYPE=Release
+docker run --rm -v /home/aecriclin/3d_slam_ws:/root/slam_ws -w /root/slam_ws lightning-jazzy:dev bash -lc 'colcon build --packages-select hikari_loclite --cmake-args -DCMAKE_BUILD_TYPE=Release --base-path src/'
 ```
 
 When a change affects only docs or Trellis specs, run template-residue and index
