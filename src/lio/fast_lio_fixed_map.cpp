@@ -54,6 +54,18 @@ bool FastLioFixedMap::Init(const std::string& yaml_path) {
         p_imu_->SetAccBiasCov(Vec3d(b_acc_cov, b_acc_cov, b_acc_cov));
         p_imu_->SetUseIMUFilter(use_imu_filter);
 
+        // Humanoid IMU acceleration spike filter config
+        auto imu_fl = yaml["fast_lio"];
+        IMUFilter::Config imu_filter_cfg;
+        imu_filter_cfg.acc_norm_min = imu_fl["imu_humanoid_acc_norm_min"].as<double>(4.0);
+        imu_filter_cfg.acc_norm_max = imu_fl["imu_humanoid_acc_norm_max"].as<double>(18.0);
+        imu_filter_cfg.acc_delta_max = imu_fl["imu_humanoid_acc_delta_max"].as<double>(8.0);
+        imu_filter_cfg.acc_clamp_norm_max = imu_fl["imu_humanoid_acc_clamp_norm_max"].as<double>(25.0);
+        imu_filter_cfg.acc_cov_scale_on_spike = imu_fl["imu_humanoid_acc_cov_scale_on_spike"].as<double>(10.0);
+        imu_filter_cfg.spike_log_rate_hz = imu_fl["imu_humanoid_spike_log_rate_hz"].as<double>(1.0);
+        imu_filter_cfg.baseline_alpha = imu_fl["imu_humanoid_baseline_alpha"].as<double>(0.01);
+        p_imu_->SetIMUFilterConfig(imu_filter_cfg);
+
         // iVox
         ivox_options_.resolution_ = yaml["fast_lio"]["ivox_grid_resolution"].as<float>(0.2);
         int nearby_type = yaml["fast_lio"]["ivox_nearby_type"].as<int>(18);

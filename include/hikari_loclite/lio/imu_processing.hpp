@@ -67,6 +67,7 @@ class ImuProcess {
 
     bool IsIMUInited() const { return imu_need_init_ == false; }
     void SetUseIMUFilter(bool b) { use_imu_filter_ = b; }
+    void SetIMUFilterConfig(const IMUFilter::Config& cfg) { filter_.SetConfig(cfg); }
     double GetMeanAccNorm() const { return mean_acc_.norm(); }
 
     Eigen::Matrix<double, 12, 12> Q_;
@@ -148,27 +149,38 @@ class ImuProcess {
         Vec3d acc = Vec3d::Zero();
         Vec3d gyro = Vec3d::Zero();
 
+        std::vector<IMU> filtered_imu;
+        filtered_imu.reserve(v_imu.size());
+        std::vector<double> acc_cov_scales;
+        acc_cov_scales.reserve(v_imu.size());
         if (use_imu_filter_) {
-            for (auto& imu : v_imu) {
-                auto imu_f = filter_.Filter(*imu);
-                *imu = imu_f;
+            for (const auto& imu : v_imu) {
+                auto result = filter_.Filter(*imu);
+                filtered_imu.push_back(result.imu);
+                acc_cov_scales.push_back(result.cov_scale);
             }
+        } else {
+            for (const auto& imu : v_imu) {
+                filtered_imu.push_back(*imu);
+            }
+            acc_cov_scales.assign(v_imu.size(), 1.0);
         }
 
-        for (auto it_imu = v_imu.begin(); it_imu < (v_imu.end() - 1); it_imu++) {
-            auto&& head = *(it_imu);
-            auto&& tail = *(it_imu + 1);
+        int imu_idx = 0;
+        for (size_t i = 0; i + 1 < filtered_imu.size(); i++, imu_idx++) {
+            auto& head = filtered_imu[i];
+            auto& tail = filtered_imu[i + 1];
 
-            if (tail->timestamp < last_lidar_end_time_) continue;
+            if (tail.timestamp < last_lidar_end_time_) continue;
 
-            angvel_avr = .5 * (head->angular_velocity + tail->angular_velocity);
-            acc_avr = .5 * (head->linear_acceleration + tail->linear_acceleration);
+            angvel_avr = .5 * (head.angular_velocity + tail.angular_velocity);
+            acc_avr = .5 * (head.linear_acceleration + tail.linear_acceleration);
             acc_avr = acc_avr * acc_scale_factor_;
 
-            if (head->timestamp < last_lidar_end_time_) {
-                dt = tail->timestamp - last_lidar_end_time_;
+            if (head.timestamp < last_lidar_end_time_) {
+                dt = tail.timestamp - last_lidar_end_time_;
             } else {
-                dt = tail->timestamp - head->timestamp;
+                dt = tail.timestamp - head.timestamp;
             }
 
             acc = acc_avr;
@@ -176,12 +188,13 @@ class ImuProcess {
 
             if (dt > 0.1) {
                 LOG(ERROR) << "get abnormal dt: " << dt;
-                kf_state.SetTime((*it_imu)->timestamp);
+                kf_state.SetTime(head.timestamp);
                 break;
             }
 
+            double cov_scale = std::max(acc_cov_scales[imu_idx], acc_cov_scales[imu_idx + 1]);
             Q_.block<3, 3>(0, 0).diagonal() = cov_gyr_;
-            Q_.block<3, 3>(3, 3).diagonal() = cov_acc_;
+            Q_.block<3, 3>(3, 3).diagonal() = cov_acc_ * cov_scale;
             Q_.block<3, 3>(6, 6).diagonal() = cov_bias_gyr_;
             kf_state.Predict(dt, Q_, gyro, acc);
 
@@ -190,7 +203,7 @@ class ImuProcess {
             acc_s_last_ = imu_state.rot_ * acc_avr;
             for (int i = 0; i < 3; i++) acc_s_last_[i] += imu_state.grav_[i];
 
-            double offs_t = tail->timestamp - pcl_beg_time;
+            double offs_t = tail.timestamp - pcl_beg_time;
             imu_pose_.emplace_back(Pose6D(offs_t, acc_s_last_, angvel_last_, imu_state.vel_, imu_state.pos_, imu_state.rot_.matrix()));
         }
 

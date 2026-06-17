@@ -145,6 +145,16 @@ fast_lio:
   acc_cov: 0.01
   use_aa: false
   imu_filter: false
+
+  # Humanoid IMU 加速度脉冲滤波 (imu_filter: true 时激活)
+  imu_humanoid_acc_norm_min: 4.0          # m/s², |acc| 低于此 → soft spike
+  imu_humanoid_acc_norm_max: 18.0         # m/s², |acc| 高于此 → soft spike (标定后覆盖)
+  imu_humanoid_acc_delta_max: 8.0         # m/s², |acc[k]-acc[k-1]| 高于此 → soft spike
+  imu_humanoid_acc_clamp_norm_max: 25.0   # m/s², |acc| 高于此 → hard clamp + inflate (须 > acc_norm_max)
+  imu_humanoid_acc_cov_scale_on_spike: 10.0  # 脉冲时 acc 过程噪声倍率
+  imu_humanoid_spike_log_rate_hz: 1.0     # 聚合诊断日志频率 (Hz)
+  imu_humanoid_baseline_alpha: 0.01       # EMA 系数
+
   skip_lidar_num: 0
   kf_dis_th: 2.0
   kf_angle_th: 15.0
