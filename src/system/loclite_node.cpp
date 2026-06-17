@@ -85,17 +85,19 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
             gate_options.window_sec = sys["stability_gate_window_sec"].as<double>(3.0);
             gate_options.conf_upper_thres = sys["stability_gate_conf_upper_thres"].as<double>(3.0);
 
-            // base_link → lidar 外参: R = Rz(yaw)·Ry(pitch)·Rx(roll), T_lidar_base = inv(T_base_lidar)
+            // base_link → lidar 外参: T_base_lidar 仅含平移 + roll/pitch (lidar 安装倾斜), T_lidar_base = inv(T_base_lidar)。
+            // base_to_lidar_yaw 不进 T_base_lidar: 它仅作 /initialpose 的航向偏置 (绕 map 重力 Z), 不参与输出
+            // map→base TF 等任何坐标变换。否则 byw 会同时污染 /initialpose 与输出, 导致 yaw≠0 时 NDT 发散/定不住。
             const double bx = sys["base_to_lidar_x"].as<double>(0.0);
             const double by = sys["base_to_lidar_y"].as<double>(0.0);
             const double bz = sys["base_to_lidar_z"].as<double>(0.0);
             const double br = sys["base_to_lidar_roll"].as<double>(0.0);
             const double bp = sys["base_to_lidar_pitch"].as<double>(0.0);
             const double byw = sys["base_to_lidar_yaw"].as<double>(0.0);
+            extrinsic_yaw_ = byw;  // 仅供 /initialpose 航向偏置 (yaw_lidar = yaw_init + byw), 不进 T_base_lidar
             const Eigen::AngleAxisd roll_aa(br, Vec3d::UnitX());
             const Eigen::AngleAxisd pitch_aa(bp, Vec3d::UnitY());
-            const Eigen::AngleAxisd yaw_aa(byw, Vec3d::UnitZ());
-            const Mat3d R_base_lidar = (yaw_aa * pitch_aa * roll_aa).toRotationMatrix();
+            const Mat3d R_base_lidar = (pitch_aa * roll_aa).toRotationMatrix();  // 无 yaw
             const SE3 T_base_lidar(SO3(R_base_lidar), Vec3d(bx, by, bz));
             T_lidar_base_ = T_base_lidar.inverse();
             RCLCPP_INFO(this->get_logger(), "base->lidar extrinsic: t=[%.3f, %.3f, %.3f], rpy=[%.3f, %.3f, %.3f]",
@@ -122,6 +124,7 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
             init_accum_window_sec_ = reloc["init_accum_window_sec"].as<double>(2.0);
             init_accum_max_wait_sec_ = reloc["init_accum_max_wait_sec"].as<double>(5.0);
             init_accum_voxel_leaf_ = reloc["init_accum_voxel_leaf"].as<double>(0.1);
+            ndt_local_recovery_enabled_ = reloc["ndt_local_recovery"].as<bool>(true);
         }
         if (yaml["runtime"]) {
             auto rt = yaml["runtime"];
@@ -137,6 +140,13 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
         if (yaml["ndt"]) {
             ndt_good_rate_hz_ = yaml["ndt"]["good_rate_hz"].as<double>(1.0);
             ndt_gain_good_ = yaml["ndt"]["gain_good"].as<double>(0.5);
+        }
+        // 物理运动合理性门控 (sanity_gate.*): 速度/加速度超阈值即时 LOST
+        if (yaml["sanity_gate"]) {
+            auto sg = yaml["sanity_gate"];
+            sanity_gate_enabled_ = sg["enabled"].as<bool>(true);
+            sanity_max_speed_mps_ = sg["max_speed_mps"].as<double>(1.0);
+            sanity_max_accel_mps2_ = sg["max_accel_mps2"].as<double>(0.8);
         }
         // smoother 跳变门限 (Phase1 可配; 缺省用 Options 默认值, 见 lite_pose_smoother.hpp)
         if (yaml["smoother"]) {
@@ -237,6 +247,11 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
                 "LitePoseSmoother: max_output_jump=%.2f m/%.1f deg, max_correction=%.2f m/%.1f deg",
                 smoother_options.max_output_jump_trans_m, smoother_options.max_output_jump_rot_deg,
                 smoother_options.max_correction_trans_m, smoother_options.max_correction_rot_deg);
+
+    RCLCPP_INFO(this->get_logger(),
+                "SanityGate: enabled=%d, max_speed=%.2f m/s, max_accel=%.2f m/s², ndt_local_recovery=%d",
+                sanity_gate_enabled_ ? 1 : 0, sanity_max_speed_mps_, sanity_max_accel_mps2_,
+                ndt_local_recovery_enabled_ ? 1 : 0);
 
     // 重力对齐滤波器 (lidar_frame → level_frame 纯旋转 TF)
     GravityAlignmentFilter::Options gf_options;
@@ -448,9 +463,10 @@ void LocLiteNode::OnInitialPose(geometry_msgs::msg::PoseWithCovarianceStamped::S
     std::lock_guard<std::mutex> lk(mutex_);
 
     // 语义: 收到的是 T_map_base (2D 贴地, 通常 z=roll=pitch=0), 是"指令"而非"建议".
-    // 真正要喂给 LIO 的是 T_map_lidar, 必须做外参与姿态补偿 (照 lightning loc_system.cc):
+    // 真正要喂给 LIO 的是 T_map_lidar, 必须做外参与姿态补偿:
     //   1) 只取 /initialpose 的 x/y/z 与 yaw, roll/pitch 从当前 LIO 重力对齐姿态读取
-    //   2) T_map_lidar = T_map_base × T_base_lidar
+    //   2) yaw 用外参 base_to_lidar_yaw 修正 (/initialpose 在雷达系, 需对齐到 map)
+    //   3) T_map_lidar = T_map_base × T_base_lidar
     const auto& p = msg->pose.pose;
     Quatd q_in(p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z);
     q_in.normalize();
@@ -476,6 +492,11 @@ void LocLiteNode::OnInitialPose(geometry_msgs::msg::PoseWithCovarianceStamped::S
     // 状态机原子复位: 清空 bad/good 计数 (SetInitializing 内) 与 lost 计时器
     state_machine_.SetInitializing("external_pose");
     lost_enter_ts_ = -1.0;
+    // 解冻 + 重置 sanity gate 速度/加速度状态
+    pose_frozen_ = false;
+    has_last_good_ = false;
+    last_vel_ = Vec3d::Zero();
+    last_vel_ts_ = -1.0;
 
     // blackout 窗口: 记录截止时刻, 阻断 SC 自动注入
     const double now_sec = this->now().seconds();
@@ -535,6 +556,52 @@ void LocLiteNode::ProcessFrame() {
     }
 
     if (loc_state == LiteLocState::Good || loc_state == LiteLocState::Degraded) {
+        // S1: 物理运动合理性门控 — 在 smoother 之前检查原始 LIO 输出
+        if (sanity_gate_enabled_) {
+            const double speed = state.vel_.norm();
+            bool sanity_fail = false;
+            const char* sanity_reason = nullptr;
+            if (speed > sanity_max_speed_mps_) {
+                sanity_reason = "sanity_speed";
+                RCLCPP_WARN(this->get_logger(),
+                            "[SanityGate] speed=%.3f m/s > %.3f m/s, trigger LOST",
+                            speed, sanity_max_speed_mps_);
+                sanity_fail = true;
+            }
+            if (!sanity_fail && last_vel_ts_ > 0.0 && ts > last_vel_ts_) {
+                const double dt = ts - last_vel_ts_;
+                const double accel = (state.vel_ - last_vel_).norm() / dt;
+                if (accel > sanity_max_accel_mps2_) {
+                    sanity_reason = "sanity_accel";
+                    RCLCPP_WARN(this->get_logger(),
+                                "[SanityGate] accel=%.3f m/s² > %.3f m/s², trigger LOST",
+                                accel, sanity_max_accel_mps2_);
+                    sanity_fail = true;
+                }
+            }
+            if (sanity_fail) {
+                // 保存最后可信位姿 (k-1 帧) 用于冻结
+                if (has_last_good_) {
+                    frozen_T_map_base_ = last_good_T_map_base_;
+                    frozen_T_map_lidar_ = last_good_T_map_lidar_;
+                    pose_frozen_ = true;
+                }
+                state_machine_.SetLost(sanity_reason);
+                lost_enter_ts_ = ts;
+                if (reloc_->AutoOnLost() && reloc_->RelocReady()) {
+                    reloc_->Arm("sanity_gate", this->now().seconds());
+                }
+                // 立即发布冻结位姿 (不发布可能发散的 LIO 位姿)
+                if (pose_frozen_) {
+                    PublishPose(frozen_T_map_base_, ts);
+                } else {
+                    PublishPose(state);
+                }
+                PublishStatusTopics(ts);
+                return;
+            }
+        }
+
         const SE3 raw_lidar_pose = lio_->ImuPoseToLidarPose(state.GetPose());
         const SE3 smoothed_lidar_pose = smoother_.UpdateFastLioPose(raw_lidar_pose);
         const SE3 smoother_delta = smoothed_lidar_pose.inverse() * raw_lidar_pose;
@@ -545,16 +612,29 @@ void LocLiteNode::ProcessFrame() {
         const auto prev = state_machine_.State();
         state_machine_.ObserveTrackingQuality(lio_->TrackingQualityGood() && !output_jump_rejected);
         if (state_machine_.State() == LiteLocState::Lost && prev != LiteLocState::Lost) {
-            // Lost 进入时刻, 供 lost_timeout_sec 计时 (不立即转 WAIT)
+            // 保存最后可信位姿用于冻结
+            if (has_last_good_) {
+                frozen_T_map_base_ = last_good_T_map_base_;
+                frozen_T_map_lidar_ = last_good_T_map_lidar_;
+                pose_frozen_ = true;
+            }
             lost_enter_ts_ = ts;
             RCLCPP_WARN(this->get_logger(), "tracking lost (reason=%s), waiting %.1f s before WAIT_FOR_INITIALPOSE",
                         state_machine_.Reason().c_str(), lost_timeout_sec_);
-            // Arm reloc for LOST recovery
             if (reloc_->AutoOnLost() && reloc_->RelocReady()) {
                 reloc_->Arm("lost", this->now().seconds());
                 RCLCPP_INFO(this->get_logger(), "reloc armed for LOST recovery (backend=%s)",
                             reloc_->BackendIsKiss() ? "kiss" : "sc");
             }
+        }
+
+        // S2: 通过门控后持续更新最后可信位姿 (供冻结 + NDT 先验)
+        if (state_machine_.State() == LiteLocState::Good || state_machine_.State() == LiteLocState::Degraded) {
+            last_good_T_map_lidar_ = lio_->ImuPoseToLidarPose(state.GetPose());
+            last_good_T_map_base_ = last_good_T_map_lidar_ * T_lidar_base_;
+            has_last_good_ = true;
+            last_vel_ = state.vel_;
+            last_vel_ts_ = ts;
         }
 
         // Good 态低频 NDT 漂移校正
@@ -565,7 +645,12 @@ void LocLiteNode::ProcessFrame() {
                                  "Fast-LIO output jump rejected by smoother, mark tracking bad");
         }
 
-        PublishPose(state);
+        // ObserveTrackingQuality 可能已触发 LOST → 发布冻结位姿而非发散 LIO 位姿
+        if (state_machine_.State() == LiteLocState::Lost && pose_frozen_) {
+            PublishPose(frozen_T_map_base_, ts);
+        } else {
+            PublishPose(state);
+        }
     } else if (loc_state == LiteLocState::Initializing) {
         // 稳定门控期 (照 lightning 方案 B): TF/odom 照发, loc_state 保持 Initializing,
         // 滑窗内位姿抖动收敛 (或 NDT TP 提前放行) 后才切 Good.
@@ -600,8 +685,30 @@ void LocLiteNode::ProcessFrame() {
             state_machine_.SetWaitForInitialPose("lost_timeout");
             reloc_->Disarm("lost_timeout");
             lost_enter_ts_ = -1.0;
+            pose_frozen_ = false;
+            has_last_good_ = false;
             PublishStatusTopics(ts);  // 转 WAIT 立即上报一次, 之后交给 1Hz timer
             return;
+        }
+
+        // S3: NDT 局部恢复 — 用冻结位姿做先验, 局部搜索 (通过即快速恢复, 不走全局重定位)
+        // 节流: LOST 态 ~3Hz (嵌入式 CPU 预算), 避免每帧 (~10Hz) 都跑 Validate
+        if (pose_frozen_ && ndt_local_recovery_enabled_ && lio_has_output_ &&
+            (last_ndt_recovery_ts_ < 0.0 || ts - last_ndt_recovery_ts_ >= 0.33)) {
+            last_ndt_recovery_ts_ = ts;
+            // frozen_T_map_lidar_ 本身就是 lidar 系, Validate 吃 T_map_lidar, 不需转换
+            const NdtResult ndt_res = ndt_->Validate(frozen_T_map_lidar_, scan);
+            if (ndt_res.valid) {
+                RCLCPP_INFO(this->get_logger(),
+                            "[NDT-LocalRecovery] success: TP=%.3f, dt=%.3f m, dr=%.2f deg",
+                            ndt_res.confidence, ndt_res.delta_trans_m, ndt_res.delta_rot_deg);
+                RecoverFromLost(ndt_res.pose, ts, ndt_res.confidence, "ndt_local_recovery");
+                // 用恢复后的位姿发布, 避免发散 LIO state 的一帧毛刺
+                const SE3 recovered_base = ndt_res.pose * T_lidar_base_;
+                PublishPose(recovered_base, ts);
+                PublishStatusTopics(ts);
+                return;
+            }
         }
 
         // reloc recovery in LOST state: attempt if armed and auto_on_lost
@@ -609,9 +716,13 @@ void LocLiteNode::ProcessFrame() {
             TryScRelocalize(scan, ts);
         }
 
-        // Publish degraded pose (LIO still running, downstream may need odom)
+        // LOST/WAIT 期间发布冻结位姿 (新时间戳), 防止发散 LIO 位姿污染 TF
         if (state_machine_.State() == LiteLocState::Lost) {
-            PublishPose(state);
+            if (pose_frozen_) {
+                PublishPose(frozen_T_map_base_, ts);
+            } else {
+                PublishPose(state);
+            }
         }
     } else if (loc_state == LiteLocState::WaitForInitialPose || loc_state == LiteLocState::Uninitialized) {
         // reloc auto-on-init: attempt if armed and LIO has output
@@ -726,11 +837,12 @@ bool LocLiteNode::UpdatePendingInitPoseWithGravity() {
         return true;
     }
 
+    // 重力对齐: roll/pitch 从 LIO 读取, yaw 用外参修正 (/initialpose 在雷达系, 需对齐到 map)
     const Mat3d R_lidar = lio_->LatestPose().so3().matrix();
     const double roll_lio = std::atan2(R_lidar(2, 1), R_lidar(2, 2));
     const double pitch_lio = std::asin(-std::clamp(R_lidar(2, 0), -1.0, 1.0));
 
-    const Eigen::AngleAxisd yaw_aa(pending_init_yaw_, Vec3d::UnitZ());
+    const Eigen::AngleAxisd yaw_aa(pending_init_yaw_ + extrinsic_yaw_, Vec3d::UnitZ());
     const Eigen::AngleAxisd pitch_aa(pitch_lio, Vec3d::UnitY());
     const Eigen::AngleAxisd roll_aa(roll_lio, Vec3d::UnitX());
     const Mat3d R_map_base = (yaw_aa * pitch_aa * roll_aa).toRotationMatrix();
@@ -741,8 +853,9 @@ bool LocLiteNode::UpdatePendingInitPoseWithGravity() {
 
     RCLCPP_INFO(this->get_logger(),
                 "[FC-Init] gravity compensation ready: roll_lidar=%.1f deg, pitch_lidar=%.1f deg, "
-                "candidate=[%.3f, %.3f, %.3f], yaw=%.1f deg",
+                "yaw_extrinsic=%.1f deg, candidate=[%.3f, %.3f, %.3f], yaw=%.1f deg",
                 roll_lio * 180.0 / M_PI, pitch_lio * 180.0 / M_PI,
+                extrinsic_yaw_ * 180.0 / M_PI,
                 pending_init_pose_.translation().x(), pending_init_pose_.translation().y(),
                 pending_init_pose_.translation().z(), pending_init_yaw_ * 180.0 / M_PI);
     return true;
@@ -920,6 +1033,75 @@ void LocLiteNode::PublishPose(const NavState& state) {
     }
 }
 
+void LocLiteNode::PublishPose(const SE3& frozen_T_map_base, double ts) {
+    const rclcpp::Time stamp = ToRosTime(ts);
+    marker_pose_ = frozen_T_map_base;
+
+    // odom: 冻结位姿 (map→base_link 系, 与非冻结版 child_frame=lidar_frame 保持一致)
+    if (publish_odom_) {
+        auto odom_msg = std::make_unique<nav_msgs::msg::Odometry>();
+        odom_msg->header.stamp = stamp;
+        odom_msg->header.frame_id = map_frame_id_;
+        odom_msg->child_frame_id = base_frame_id_;
+        odom_msg->pose.pose = ToPoseMsg(frozen_T_map_base);
+        odom_pub_->publish(std::move(odom_msg));
+    }
+
+    // TF map → base_link: 冻结位姿 + 当前帧时间戳 (持续重广播)
+    if (publish_tf_) {
+        geometry_msgs::msg::TransformStamped tf_msg;
+        tf_msg.header.stamp = stamp;
+        tf_msg.header.frame_id = map_frame_id_;
+        tf_msg.child_frame_id = base_frame_id_;
+        tf_msg.transform.translation.x = frozen_T_map_base.translation().x();
+        tf_msg.transform.translation.y = frozen_T_map_base.translation().y();
+        tf_msg.transform.translation.z = frozen_T_map_base.translation().z();
+        const auto q = frozen_T_map_base.unit_quaternion();
+        tf_msg.transform.rotation.x = q.x();
+        tf_msg.transform.rotation.y = q.y();
+        tf_msg.transform.rotation.z = q.z();
+        tf_msg.transform.rotation.w = q.w();
+        tf_pub_->sendTransform(tf_msg);
+    }
+    // 冻结期 path 不追加 (防止发散轨迹污染路径)
+}
+
+void LocLiteNode::RecoverFromLost(const SE3& ndt_pose, double ts, double ndt_confidence, const char* reason) {
+    lio_->ResetToMapPose(ndt_pose);
+    smoother_.Reset();
+    last_ndt_confidence_ = ndt_confidence;
+    marker_pose_ = ndt_pose;
+    pose_frozen_ = false;
+    has_last_good_ = false;
+    lost_enter_ts_ = -1.0;
+    last_ndt_recovery_ts_ = -1.0;
+    last_vel_ = Vec3d::Zero();
+    last_vel_ts_ = -1.0;
+    last_ndt_correct_ts_ = ts;
+    has_pending_init_pose_ = false;
+    init_retry_count_ = 0;
+    ResetInitAccumulation();
+    reloc_->ClearAccumulation();
+
+    if (stability_gate_enabled_) {
+        stability_gate_.Reset();
+        state_machine_.SetInitializing(reason);
+        RCLCPP_INFO(this->get_logger(),
+                    "[LostRecover] %s: pos=[%.3f, %.3f, %.3f], TP=%.3f, stability gate armed",
+                    reason, ndt_pose.translation().x(), ndt_pose.translation().y(),
+                    ndt_pose.translation().z(), last_ndt_confidence_);
+    } else {
+        state_machine_.SetGood(reason);
+        if (reloc_->DisableAfterGood()) {
+            reloc_->Disarm(reason);
+        }
+        RCLCPP_INFO(this->get_logger(),
+                    "[LostRecover] %s: pos=[%.3f, %.3f, %.3f], TP=%.3f, GOOD",
+                    reason, ndt_pose.translation().x(), ndt_pose.translation().y(),
+                    ndt_pose.translation().z(), last_ndt_confidence_);
+    }
+}
+
 void LocLiteNode::PublishStatusTopics(double ts) {
     // loc_state: 状态机枚举整数 0-5
     std_msgs::msg::Int32 state_msg;
@@ -1009,6 +1191,12 @@ void LocLiteNode::OnHealthTimer() {
                     imu_age, imu_timeout_sec_, lidar_age, lidar_timeout_sec_,
                     now_wall - input_stale_since_wall_);
                 if (st != LiteLocState::Lost) {
+                    // 冻结最后可信位姿 (与 ProcessFrame 门控路径一致)
+                    if (has_last_good_) {
+                        frozen_T_map_base_ = last_good_T_map_base_;
+                        frozen_T_map_lidar_ = last_good_T_map_lidar_;
+                        pose_frozen_ = true;
+                    }
                     state_machine_.SetLost("input_timeout");
                     lost_enter_ts_ = -1.0;  // 重置, 输入恢复后由 ProcessFrame 的 Lost 分支按 scan ts 重新计时
                     if (reloc_->AutoOnLost() && reloc_->RelocReady()) {
@@ -1141,38 +1329,8 @@ void LocLiteNode::TryScRelocalize(const CloudPtr& scan, double ts, bool manual) 
         return;
     }
 
-    // Accept: reset to NDT-refined pose
-    lio_->ResetToMapPose(ndt_res.pose);
-    smoother_.Reset();
-    last_ndt_confidence_ = ndt_res.confidence;
-    marker_pose_ = ndt_res.pose;
-    lost_enter_ts_ = -1.0;
-    last_ndt_correct_ts_ = ts;
-    has_pending_init_pose_ = false;
-    init_retry_count_ = 0;
-    ResetInitAccumulation();
-    // ResetToMapPose 后 LIO 位姿域断裂, 稳定门控分支下 reloc 仍 armed, 必须清空累积缓冲
-    reloc_->ClearAccumulation();
-
-    if (stability_gate_enabled_) {
-        stability_gate_.Reset();
-        state_machine_.SetInitializing("reloc_validated");
-        RCLCPP_INFO(this->get_logger(),
-                    "[Reloc] %s accepted: pos=[%.3f, %.3f, %.3f], TP=%.3f, stability gate armed",
-                    backend, ndt_res.pose.translation().x(),
-                    ndt_res.pose.translation().y(), ndt_res.pose.translation().z(),
-                    ndt_res.confidence);
-    } else {
-        state_machine_.SetGood("reloc_validated");
-        if (reloc_->DisableAfterGood()) {
-            reloc_->Disarm("reloc_validated");
-        }
-        RCLCPP_INFO(this->get_logger(),
-                    "[Reloc] %s accepted: pos=[%.3f, %.3f, %.3f], TP=%.3f, GOOD",
-                    backend, ndt_res.pose.translation().x(),
-                    ndt_res.pose.translation().y(), ndt_res.pose.translation().z(),
-                    ndt_res.confidence);
-    }
+    // Accept: reset to NDT-refined pose, 公共恢复收尾
+    RecoverFromLost(ndt_res.pose, ts, ndt_res.confidence, "reloc_validated");
 }
 
 void LocLiteNode::PublishScDebugTopics() {

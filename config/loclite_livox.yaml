@@ -103,6 +103,9 @@ reloc:
   reloc_max_delta_trans_m: 2.0          # 重定位候选 NDT 验证: 收敛位姿相对候选的平移上限 (m)
   reloc_max_delta_rot_deg: 15.0         # 重定位候选 NDT 验证: 收敛位姿相对候选的旋转上限 (deg)
 
+  # ==== NDT 局部恢复 (LOST 帧内先用冻结位姿做 NDT 局部搜索, 通过即快速恢复) ====
+  ndt_local_recovery: true              # false 时 LOST 直接走 KISS/SC 全局重定位
+
 runtime:
   publish_tf: true                      # map→base_link 与 lidar_frame→level_frame TF
   publish_odom: true                    # hikari_loc/odom
@@ -203,3 +206,10 @@ smoother:
   max_output_jump_rot_deg: 15.0         # Fast-LIO 输出位姿单帧旋转跳变上限 (deg)
   max_correction_trans_m: 0.5           # GOOD 态 NDT 校正相对 fast_pose 的平移上限 (m), 超过整帧拒绝校正
   max_correction_rot_deg: 8.0           # GOOD 态 NDT 校正相对 fast_pose 的旋转上限 (deg)
+
+sanity_gate:
+  # 物理运动合理性硬门控: LIO 估计速度/加速度超阈值 → 即时 LOST (绕过坏帧计数)
+  # 仅在 Good/Degraded 帧 LIO 正常产出时检查; LOST/WAIT 等态不检查
+  enabled: true                         # 总开关
+  max_speed_mps: 1.0                    # 速度阈值 (m/s), state.vel_.norm() 超过即 LOST
+  max_accel_mps2: 0.8                   # 加速度阈值 (m/s²), 差分速度 |v_k - v_{k-1}|/dt 超过即 LOST

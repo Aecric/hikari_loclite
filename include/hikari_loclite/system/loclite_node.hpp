@@ -84,6 +84,8 @@ class LocLiteNode : public rclcpp::Node {
 
     /// odom + TF(map→base_link) + path
     void PublishPose(const NavState& state);
+    /// 冻结态发布: LOST/WAIT 期间用冻结位姿 + 当前时间戳重广播 (path 不追加)
+    void PublishPose(const SE3& frozen_T_map_base, double ts);
     /// loc_state + ndt_status + loc_status marker
     void PublishStatusTopics(double ts);
     void PublishStatusMarker(double ts);
@@ -91,6 +93,8 @@ class LocLiteNode : public rclcpp::Node {
     void OnHealthTimer();
     /// /hikari_loc/status: [state, ndt_conf, imu_age_s, lidar_age_s, fps, in_map] (持锁)
     void PublishRichStatus(double now_wall, double imu_age, double lidar_age);
+    /// LOST 恢复成功后公共收尾: 解冻 + smoother.Reset + ClearAccumulation + 状态恢复
+    void RecoverFromLost(const SE3& ndt_pose, double ts, double ndt_confidence, const char* reason);
     /// 发布降采样后的全局 PCD 地图到 /pcdmap (transient_local, 供 RViz 定位验证)
     void PublishPcdMap();
     /// lidar_frame → level_frame 重力对齐 TF (每条 IMU 后调用, 持锁)
@@ -103,6 +107,7 @@ class LocLiteNode : public rclcpp::Node {
     std::string level_frame_id_ = "level_frame";
     std::string base_frame_id_ = "base_link";
     SE3 T_lidar_base_;                              // inv(T_base_lidar), 由 system.base_to_lidar_* 构造
+    double extrinsic_yaw_ = 0.0;                    // base_to_lidar_yaw, 用于 /initialpose yaw 对齐
     Mat3d cached_extrinsic_R_ = Mat3d::Identity();  // fast_lio.extrinsic_R (R_imu_lidar), 供 level_frame TF 用
     double external_pose_blackout_sec_ = 5.0;
     double lost_timeout_sec_ = 5.0;
@@ -152,6 +157,25 @@ class LocLiteNode : public rclcpp::Node {
     double last_path_pub_ts_ = -1.0;
     double last_level_tf_ts_ = -1.0;      // 上次 level TF 的状态时间戳, 防止 IMU 速率下重复广播同一 stamp
     double last_sc_attempt_ts_ = -1.0;    // SC 重定位尝试节流 (cooldown)
+
+    // --- 物理运动合理性门控 (sanity_gate.*) ---
+    bool sanity_gate_enabled_ = true;
+    double sanity_max_speed_mps_ = 1.0;   // 速度阈值 (m/s), 超过即判定 LOST
+    double sanity_max_accel_mps2_ = 0.8;  // 加速度阈值 (m/s²), 超过即判定 LOST
+    Vec3d last_vel_ = Vec3d::Zero();      // 上一帧 ESKF 速度 (世界系), 用于差分加速度
+    double last_vel_ts_ = -1.0;           // 上一帧速度对应的 scan 时间戳 (传感器时间域)
+
+    // --- TF 冻结 + 最后可信位姿 ---
+    bool pose_frozen_ = false;            // LOST 期间冻结 TF
+    SE3 frozen_T_map_base_;               // 冻结的 map→base_link 位姿
+    SE3 frozen_T_map_lidar_;              // 冻结的 map→lidar 位姿 (NDT 先验用)
+    SE3 last_good_T_map_base_;            // 最近一次通过门控的 map→base_link
+    SE3 last_good_T_map_lidar_;           // 最近一次通过门控的 map→lidar
+    bool has_last_good_ = false;          // 是否有可信的历史位姿
+
+    // --- NDT 局部恢复 (reloc.ndt_local_recovery) ---
+    bool ndt_local_recovery_enabled_ = true;
+    double last_ndt_recovery_ts_ = -1.0;  // NDT 局部恢复节流 (scan 时间域, ~3Hz)
     SE3 marker_pose_;                     // loc_status marker 的悬浮位置 (最近一次有意义的位姿)
     // watchdog 时戳全部用 node clock (this->now()): 真机=墙钟, sim/bag=sim 钟, 自洽且不与 scan ts 跨域比较
     double last_imu_wall_ts_ = -1.0;      // 最近一条 IMU 到达时刻
