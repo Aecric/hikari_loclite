@@ -20,6 +20,77 @@ It publishes:
 - TF when configured
 - optional path/debug output only when configured
 
+### Scenario: Odometry Pose And Twist Semantics
+
+### 1. Scope / Trigger
+
+- Trigger: any change to `hikari_loc/odom`, `PublishPose`, frame IDs, frozen
+  LOST publication, or downstream velocity semantics.
+- Owner: `LocLiteNode`, because it owns ROS odometry publication and TF output.
+
+### 2. Signatures
+
+- ROS topic: `hikari_loc/odom`
+- Message type: `nav_msgs/msg/Odometry`
+- Normal publisher path: `LocLiteNode::PublishPose(const NavState& state)`
+- Frozen/recovery immediate publisher path: `LocLiteNode::PublishPose(const SE3& T_map_lidar, double ts)`
+
+### 3. Contracts
+
+- `header.frame_id` must be `common.map_frame_id`.
+- `child_frame_id` must be `system.lidar_frame_id`.
+- `pose.pose` must represent `map -> lidar_frame_id`, not `map -> base_frame_id`.
+- During normal tracking, `twist.twist.linear` must be ESKF `NavState::GetVel()`
+  rotated from map/world frame into `child_frame_id`:
+  `v_lidar = R_map_lidar.inverse() * v_map`.
+- `twist.twist.angular` stays zero until an angular velocity posterior is
+  explicitly exposed.
+- `twist.covariance` stays at the ROS message default until velocity covariance
+  is explicitly modeled.
+- LOST/frozen publication must publish frozen `map -> lidar_frame_id` pose and
+  zero twist. TF freeze may still publish `map -> base_frame_id` separately.
+- Do not add IMU/lidar lever-arm velocity compensation unless angular velocity
+  is available and the frame contract is updated here.
+
+### 4. Validation & Error Matrix
+
+- Missing ESKF velocity -> publish zero only if the caller is explicitly a
+  frozen/recovery immediate path; normal tracking should use `NavState::GetVel()`.
+- LOST/frozen state -> publish zero twist to avoid reporting stale physical
+  motion as live odometry velocity.
+- Need base-frame velocity -> downstream should transform through TF; this node
+  does not publish base-link odometry.
+
+### 5. Good/Base/Bad Cases
+
+- Good: normal `hikari_loc/odom` has `child_frame_id=livox_frame` and linear
+  twist in that same Livox/lidar frame.
+- Base: `runtime.publish_odom=false` disables odometry publication entirely.
+- Bad: pose is `map -> lidar_frame_id` but twist remains in map/world frame.
+- Bad: frozen LOST odometry switches `child_frame_id` to `base_frame_id`.
+
+### 6. Tests Required
+
+- Build: run the containerized Release build from the Build And Dependencies spec.
+- Runtime smoke when data is available: echo one normal `hikari_loc/odom` message
+  and assert `child_frame_id == system.lidar_frame_id` and nonzero linear twist
+  while moving.
+- Runtime LOST/freeze smoke when available: force LOST and assert odometry keeps
+  `child_frame_id == system.lidar_frame_id` with zero twist.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Publishing ESKF velocity directly into `odom.twist.twist.linear` while
+`child_frame_id` is `livox_frame`; that reports map-frame velocity under a
+child-frame twist contract.
+
+#### Correct
+
+Rotate ESKF map-frame linear velocity into the odometry child frame and leave
+angular/covariance fields unset until those states are modeled.
+
 ## Scenario: Optional PCD Map Debug Publisher
 
 ### 1. Scope / Trigger

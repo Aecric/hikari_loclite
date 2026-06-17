@@ -5,9 +5,13 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <yaml-cpp/yaml.h>
 
+#include <pthread.h>
+#include <sched.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <future>
 #include <limits>
 #include <vector>
 
@@ -29,6 +33,37 @@ geometry_msgs::msg::Pose ToPoseMsg(const SE3& T) {
 }
 
 rclcpp::Time ToRosTime(double ts) { return rclcpp::Time(static_cast<int64_t>(ts * 1e9)); }
+
+void FillOdomMsg(nav_msgs::msg::Odometry& odom_msg, const rclcpp::Time& stamp,
+                 const std::string& map_frame_id, const std::string& lidar_frame_id,
+                 const SE3& T_map_lidar, const Vec3d& linear_velocity_map) {
+    odom_msg.header.stamp = stamp;
+    odom_msg.header.frame_id = map_frame_id;
+    odom_msg.child_frame_id = lidar_frame_id;
+    odom_msg.pose.pose = ToPoseMsg(T_map_lidar);
+
+    // nav_msgs/Odometry defines twist in child_frame_id. ESKF velocity is in map,
+    // so rotate it into lidar_frame only; lever-arm velocity needs angular
+    // velocity, which is not an ESKF posterior output here. Keep angular zero and
+    // leave covariance at default.
+    const Vec3d linear_velocity_lidar = T_map_lidar.so3().inverse() * linear_velocity_map;
+    odom_msg.twist.twist.linear.x = linear_velocity_lidar.x();
+    odom_msg.twist.twist.linear.y = linear_velocity_lidar.y();
+    odom_msg.twist.twist.linear.z = linear_velocity_lidar.z();
+    odom_msg.twist.twist.angular.x = 0.0;
+    odom_msg.twist.twist.angular.y = 0.0;
+    odom_msg.twist.twist.angular.z = 0.0;
+}
+
+/// best-effort: 把调用线程降到 SCHED_OTHER(普通分时, prio 0). KISS 工作线程默认继承创建者
+/// (spin 线程) 的调度策略; 若 spin 被设成 SCHED_FIFO 实时优先级, CPU 密集的 KISS 会在同核
+/// 以同优先级抢占/饿死它本要解耦的 spin 线程. 失败 (无权限/不支持) 静默忽略 —— 未开实时调度时
+/// spin 本就是 SCHED_OTHER, worker 继承后调用此函数为 no-op.
+void DropThreadToNormalSched() {
+    struct sched_param param;
+    param.sched_priority = 0;
+    pthread_setschedparam(pthread_self(), SCHED_OTHER, &param);
+}
 
 }  // namespace
 
@@ -132,6 +167,9 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
             publish_odom_ = rt["publish_odom"].as<bool>(true);
             publish_path_ = rt["publish_path"].as<bool>(true);
             publish_pcdmap_ = rt["publish_pcdmap"].as<bool>(false);
+            imu_extrapolate_tf_ = rt["imu_extrapolate_tf"].as<bool>(false);
+            imu_extrapolate_max_dt_sec_ = rt["imu_extrapolate_max_dt_sec"].as<double>(0.05);
+            imu_extrapolate_max_ahead_sec_ = rt["imu_extrapolate_max_ahead_sec"].as<double>(0.20);
             watchdog_enabled_ = rt["watchdog_enabled"].as<bool>(true);
             imu_timeout_sec_ = rt["imu_timeout_sec"].as<double>(1.0);
             lidar_timeout_sec_ = rt["lidar_timeout_sec"].as<double>(2.0);
@@ -225,6 +263,16 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
                         "KISS reloc backend: target NOT ready after injection "
                         "(map too large / empty / KISS not built); reloc will be unavailable");
         }
+        // worker 专用独立 NDT 实例: KISS 异步路径在工作线程做 yaw 微扫 Validate, 与主 ndt_ 零共享
+        // (主 ndt_ 同时在 LOST NDT-local-recovery / GOOD 漂移校正中被主线程用, pclomp 非线程安全).
+        if (reloc_->KissTargetReady()) {
+            ndt_reloc_ = std::make_shared<NdtCorrector>();
+            if (!ndt_reloc_->Init(config_path_) || !ndt_reloc_->SetMap(lio_->FixedMapCloud())) {
+                RCLCPP_ERROR(this->get_logger(), "Failed to init reloc-worker NdtCorrector");
+                return false;
+            }
+            RCLCPP_INFO(this->get_logger(), "KISS reloc backend: dedicated worker NDT instance ready");
+        }
     }
 
     // 稳定门控: /initialpose 验证通过后先 Initializing, 滑窗收敛 (或高 TP 提前) 才放行 Good
@@ -278,12 +326,12 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
 
     if (lidar_type == 1) {
         livox_sub_ = create_subscription<livox_ros_driver2::msg::CustomMsg>(
-            livox_topic, rclcpp::QoS(5).best_effort(),
+            livox_topic, rclcpp::QoS(rclcpp::KeepLast(1)).best_effort(),
             [this](livox_ros_driver2::msg::CustomMsg::SharedPtr msg) { OnLivox(std::move(msg)); });
         RCLCPP_INFO(this->get_logger(), "LiDAR input: Livox CustomMsg only (%s)", livox_topic.c_str());
     } else {
         cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-            cloud_topic, rclcpp::QoS(5).best_effort(),
+            cloud_topic, rclcpp::QoS(rclcpp::KeepLast(1)).best_effort(),
             [this](sensor_msgs::msg::PointCloud2::SharedPtr msg) { OnCloud(std::move(msg)); });
         RCLCPP_INFO(this->get_logger(), "LiDAR input: PointCloud2 only (%s), lidar_type=%d",
                     cloud_topic.c_str(), lidar_type);
@@ -334,10 +382,28 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
                 return;
             }
 
+            // backend=kiss: 异步派发 worker (不阻塞服务回调/spin 线程), 立即返回 "started".
+            // 结果由 ProcessFrame 的 CollectKissReloc 在后续帧用当前 scan 复核后应用 (手动可从任意状态生效).
+            if (reloc_->BackendIsKiss()) {
+                if (reloc_inflight_) {
+                    response->success = false;
+                    response->message = "KISS reloc already in progress";
+                    return;
+                }
+                ++reloc_gen_;  // 手动请求抢注: 作废任何在飞结果
+                const CloudPtr kiss_scan = lio_->LatestDeskewedCloud();
+                const SE3 kiss_pose = lio_->LatestState().GetPose();
+                MaybeDispatchKissReloc(kiss_scan, kiss_pose, lio_->LatestState().timestamp_, /*manual=*/true);
+                response->success = reloc_inflight_;
+                response->message = reloc_inflight_
+                    ? "KISS reloc dispatched (async); result applies within a few seconds if validated"
+                    : "KISS reloc dispatch skipped (target/scan not ready)";
+                return;
+            }
+
+            // backend=sc: 同步路径 (SC ring-key 查询轻量, 不阻塞秒级). 候选未经 NDT, 节点侧统一再验.
             const CloudPtr scan = lio_->LatestDeskewedCloud();
             const SE3 current_imu_pose = lio_->LatestState().GetPose();
-            // KISS backend: 候选 pose 已在 RunKissOnce 内过 yaw 微扫 NDT (best NDT 解);
-            // SC backend: 候选未经 NDT, 节点侧统一再验. 两者下方 NDT 验证流一致.
             auto candidate = reloc_->ManualRelocalize(scan, current_imu_pose, ndt_.get());
 
             if (!candidate.valid) {
@@ -420,6 +486,9 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
                 watchdog_enabled_ ? 1 : 0, imu_timeout_sec_, lidar_timeout_sec_,
                 status_topic_enabled_ ? 1 : 0, rt_options_.enabled ? 1 : 0,
                 rt_options_.sched_fifo ? 1 : 0, rt_options_.priority, rt_options_.cpu_cores.size());
+    RCLCPP_INFO(this->get_logger(),
+                "IMU extrapolated TF: enabled=%d, max_dt=%.3fs, max_ahead=%.3fs (odom remains lidar-rate)",
+                imu_extrapolate_tf_ ? 1 : 0, imu_extrapolate_max_dt_sec_, imu_extrapolate_max_ahead_sec_);
 
     RCLCPP_INFO(this->get_logger(), "hikari_loclite initialized successfully (imu=%s, lidar_type=%d)",
                 imu_topic.c_str(), lidar_type);
@@ -428,12 +497,18 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
 
 void LocLiteNode::Shutdown() {
     RCLCPP_INFO(this->get_logger(), "hikari_loclite shutting down");
+    // 等待在飞 KISS worker 收尾, 避免线程仍在跑时节点/组件被析构 (worker 捕获的是 shared_ptr 副本,
+    // 析构 future 本身也会 join, 这里显式 wait 让关闭点确定且可见).
+    if (reloc_future_.valid()) {
+        reloc_future_.wait();
+    }
 }
 
 void LocLiteNode::OnImu(sensor_msgs::msg::Imu::SharedPtr msg) {
     std::lock_guard<std::mutex> lk(mutex_);
     last_imu_wall_ts_ = this->now().seconds();  // watchdog: IMU 到达时刻 (node clock)
     lio_->AddImu(msg);
+    MaybePublishImuExtrapolatedTF(*msg);
 
     // 每条 IMU 处理后用 LIO 最新状态更新重力对齐滤波器并发布 lidar_frame → level_frame TF
     if (publish_tf_ && lio_has_output_ && tf_pub_) {
@@ -501,6 +576,8 @@ void LocLiteNode::OnInitialPose(geometry_msgs::msg::PoseWithCovarianceStamped::S
     // blackout 窗口: 记录截止时刻, 阻断 SC 自动注入
     const double now_sec = this->now().seconds();
     blackout_deadline_sec_ = now_sec + external_pose_blackout_sec_;
+    // bump reloc generation: 让任何在飞 KISS worker 的迟到结果作废, 不覆盖用户刚下的 /initialpose
+    ++reloc_gen_;
     // Disarm SC during blackout to prevent automatic SC from overriding user's /initialpose
     if (reloc_->Armed()) {
         reloc_->Disarm("initialpose_blackout");
@@ -532,6 +609,13 @@ void LocLiteNode::ProcessFrame() {
 
     const double ts = state.timestamp_;
     const CloudPtr scan = lio_->LatestDeskewedCloud();
+
+    // 异步 KISS 重定位收尾: worker 出结果即用当前帧 scan 复核 + 应用恢复 (命中则本帧已发布, 直接返回).
+    // 放在 pending-init 之前: 若用户刚下 /initialpose, gen 已 bump, 在飞 KISS 结果会被 Collect 丢弃,
+    // 落到下方 pending-init 流程.
+    if (CollectKissReloc(scan, ts)) {
+        return;
+    }
 
     // /initialpose sticky retry: 每个新 scan 到来时验证 pending pose
     if (has_pending_init_pose_) {
@@ -593,7 +677,7 @@ void LocLiteNode::ProcessFrame() {
                 }
                 // 立即发布冻结位姿 (不发布可能发散的 LIO 位姿)
                 if (pose_frozen_) {
-                    PublishPose(frozen_T_map_base_, ts);
+                    PublishPose(frozen_T_map_lidar_, ts);
                 } else {
                     PublishPose(state);
                 }
@@ -647,7 +731,7 @@ void LocLiteNode::ProcessFrame() {
 
         // ObserveTrackingQuality 可能已触发 LOST → 发布冻结位姿而非发散 LIO 位姿
         if (state_machine_.State() == LiteLocState::Lost && pose_frozen_) {
-            PublishPose(frozen_T_map_base_, ts);
+            PublishPose(frozen_T_map_lidar_, ts);
         } else {
             PublishPose(state);
         }
@@ -704,8 +788,7 @@ void LocLiteNode::ProcessFrame() {
                             ndt_res.confidence, ndt_res.delta_trans_m, ndt_res.delta_rot_deg);
                 RecoverFromLost(ndt_res.pose, ts, ndt_res.confidence, "ndt_local_recovery");
                 // 用恢复后的位姿发布, 避免发散 LIO state 的一帧毛刺
-                const SE3 recovered_base = ndt_res.pose * T_lidar_base_;
-                PublishPose(recovered_base, ts);
+                PublishPose(ndt_res.pose, ts);
                 PublishStatusTopics(ts);
                 return;
             }
@@ -713,13 +796,18 @@ void LocLiteNode::ProcessFrame() {
 
         // reloc recovery in LOST state: attempt if armed and auto_on_lost
         if (reloc_->Armed() && reloc_->AutoOnLost() && reloc_->RelocReady()) {
-            TryScRelocalize(scan, ts);
+            // backend=kiss 走异步 worker (不阻塞 spin); backend=sc 仍同步 (查询轻量)
+            if (reloc_->BackendIsKiss()) {
+                MaybeDispatchKissReloc(scan, lio_->LatestState().GetPose(), ts, false);
+            } else {
+                TryScRelocalize(scan, ts);
+            }
         }
 
         // LOST/WAIT 期间发布冻结位姿 (新时间戳), 防止发散 LIO 位姿污染 TF
         if (state_machine_.State() == LiteLocState::Lost) {
             if (pose_frozen_) {
-                PublishPose(frozen_T_map_base_, ts);
+                PublishPose(frozen_T_map_lidar_, ts);
             } else {
                 PublishPose(state);
             }
@@ -727,7 +815,12 @@ void LocLiteNode::ProcessFrame() {
     } else if (loc_state == LiteLocState::WaitForInitialPose || loc_state == LiteLocState::Uninitialized) {
         // reloc auto-on-init: attempt if armed and LIO has output
         if (reloc_->Armed() && reloc_->AutoOnInit() && reloc_->RelocReady()) {
-            TryScRelocalize(scan, ts);
+            // backend=kiss 走异步 worker (不阻塞 spin); backend=sc 仍同步 (查询轻量)
+            if (reloc_->BackendIsKiss()) {
+                MaybeDispatchKissReloc(scan, lio_->LatestState().GetPose(), ts, false);
+            } else {
+                TryScRelocalize(scan, ts);
+            }
         }
     }
     // WaitForInitialPose / Uninitialized: 无可信位姿, 只上报状态.
@@ -980,26 +1073,9 @@ void LocLiteNode::MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, dou
                          res.confidence, res.inlier_ratio);
 }
 
-void LocLiteNode::PublishPose(const NavState& state) {
-    const double ts = state.timestamp_;
-    const rclcpp::Time stamp = ToRosTime(ts);
-    const SE3 T_map_lidar = lio_->ImuPoseToLidarPose(state.GetPose());
-    // 补偿 base_link → lidar 外参: T_map_base = T_map_lidar × T_lidar_base
-    const SE3 T_map_base = T_map_lidar * T_lidar_base_;
-    marker_pose_ = T_map_lidar;
-
-    // odom: map 下的雷达位姿
-    if (publish_odom_) {
-        auto odom_msg = std::make_unique<nav_msgs::msg::Odometry>();
-        odom_msg->header.stamp = stamp;
-        odom_msg->header.frame_id = map_frame_id_;
-        odom_msg->child_frame_id = lidar_frame_id_;
-        odom_msg->pose.pose = ToPoseMsg(T_map_lidar);
-        odom_pub_->publish(std::move(odom_msg));
-    }
-
-    // TF map → base_link
+void LocLiteNode::PublishMapToBaseTF(const SE3& T_map_lidar, const rclcpp::Time& stamp) {
     if (publish_tf_) {
+        const SE3 T_map_base = T_map_lidar * T_lidar_base_;
         geometry_msgs::msg::TransformStamped tf_msg;
         tf_msg.header.stamp = stamp;
         tf_msg.header.frame_id = map_frame_id_;
@@ -1014,6 +1090,108 @@ void LocLiteNode::PublishPose(const NavState& state) {
         tf_msg.transform.rotation.w = q.w();
         tf_pub_->sendTransform(tf_msg);
     }
+}
+
+bool LocLiteNode::ImuTfExtrapolationStateAllowsPublish() const {
+    const auto st = state_machine_.State();
+    return lio_has_output_ && !pose_frozen_ &&
+           (st == LiteLocState::Initializing || st == LiteLocState::Good || st == LiteLocState::Degraded);
+}
+
+void LocLiteNode::SeedImuTfExtrapolator(const NavState& state) {
+    if (!imu_extrapolate_tf_) {
+        imu_tf_extrapolator_valid_ = false;
+        return;
+    }
+    if (!ImuTfExtrapolationStateAllowsPublish()) {
+        imu_tf_extrapolator_valid_ = false;
+        return;
+    }
+
+    imu_tf_extrapolated_state_ = state;
+    imu_tf_last_lidar_ts_ = state.timestamp_;
+    imu_tf_last_publish_ts_ = state.timestamp_;
+    imu_tf_extrapolator_valid_ = true;
+}
+
+void LocLiteNode::MaybePublishImuExtrapolatedTF(const sensor_msgs::msg::Imu& msg) {
+    if (!imu_extrapolate_tf_ || !publish_tf_ || !tf_pub_) {
+        return;
+    }
+    if (!ImuTfExtrapolationStateAllowsPublish()) {
+        imu_tf_extrapolator_valid_ = false;
+        return;
+    }
+    if (!imu_tf_extrapolator_valid_) {
+        return;
+    }
+
+    const double imu_ts = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9;
+    if (imu_ts <= imu_tf_last_publish_ts_) {
+        if (imu_ts < imu_tf_extrapolated_state_.timestamp_) {
+            imu_tf_extrapolator_valid_ = false;
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                                 "[IMU-TF] timestamp rollback (imu=%.6f, state=%.6f), wait for next lidar seed",
+                                 imu_ts, imu_tf_extrapolated_state_.timestamp_);
+        }
+        return;
+    }
+
+    const double dt = imu_ts - imu_tf_extrapolated_state_.timestamp_;
+    if (dt <= 0.0) {
+        return;
+    }
+    if (dt > imu_extrapolate_max_dt_sec_) {
+        imu_tf_extrapolator_valid_ = false;
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "[IMU-TF] dt %.4fs > max_dt %.4fs, wait for next lidar seed",
+                             dt, imu_extrapolate_max_dt_sec_);
+        return;
+    }
+    if (imu_tf_last_lidar_ts_ >= 0.0 &&
+        imu_ts - imu_tf_last_lidar_ts_ > imu_extrapolate_max_ahead_sec_) {
+        imu_tf_extrapolator_valid_ = false;
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                             "[IMU-TF] ahead %.4fs > max_ahead %.4fs, wait for next lidar seed",
+                             imu_ts - imu_tf_last_lidar_ts_, imu_extrapolate_max_ahead_sec_);
+        return;
+    }
+
+    NavState next = imu_tf_extrapolated_state_;
+    const Vec3d gyro(msg.angular_velocity.x, msg.angular_velocity.y, msg.angular_velocity.z);
+    const Vec3d acc(msg.linear_acceleration.x, msg.linear_acceleration.y, msg.linear_acceleration.z);
+    const Vec3d omega = gyro - next.bg_;
+    const Vec3d acc_map = next.rot_ * acc + next.grav_;
+
+    next.pos_ += next.vel_ * dt + 0.5 * acc_map * dt * dt;
+    next.vel_ += acc_map * dt;
+    next.rot_ = next.rot_ * math::exp(omega, dt);
+    next.timestamp_ = imu_ts;
+
+    const SE3 T_map_lidar = lio_->ImuPoseToLidarPose(next.GetPose());
+    PublishMapToBaseTF(T_map_lidar, ToRosTime(imu_ts));
+    imu_tf_extrapolated_state_ = next;
+    imu_tf_last_publish_ts_ = imu_ts;
+}
+
+void LocLiteNode::PublishPose(const NavState& state) {
+    const double ts = state.timestamp_;
+    const rclcpp::Time stamp = ToRosTime(ts);
+    const SE3 T_map_lidar = lio_->ImuPoseToLidarPose(state.GetPose());
+    // 补偿 base_link → lidar 外参: T_map_base = T_map_lidar × T_lidar_base
+    const SE3 T_map_base = T_map_lidar * T_lidar_base_;
+    marker_pose_ = T_map_lidar;
+
+    // odom: map 下的雷达位姿
+    if (publish_odom_) {
+        auto odom_msg = std::make_unique<nav_msgs::msg::Odometry>();
+        FillOdomMsg(*odom_msg, stamp, map_frame_id_, lidar_frame_id_, T_map_lidar, state.GetVel());
+        odom_pub_->publish(std::move(odom_msg));
+    }
+
+    // TF map → base_link
+    PublishMapToBaseTF(T_map_lidar, stamp);
+    SeedImuTfExtrapolator(state);
 
     // path: 0.1s 节流追加, 最多保存 kMaxPathPoses 个位姿 (超出从头部裁剪)
     if (publish_path_ &&
@@ -1033,40 +1211,27 @@ void LocLiteNode::PublishPose(const NavState& state) {
     }
 }
 
-void LocLiteNode::PublishPose(const SE3& frozen_T_map_base, double ts) {
+void LocLiteNode::PublishPose(const SE3& T_map_lidar, double ts) {
     const rclcpp::Time stamp = ToRosTime(ts);
-    marker_pose_ = frozen_T_map_base;
+    const SE3 T_map_base = T_map_lidar * T_lidar_base_;
+    marker_pose_ = T_map_lidar;
+    imu_tf_extrapolator_valid_ = false;
 
-    // odom: 冻结位姿 (map→base_link 系, 与非冻结版 child_frame=lidar_frame 保持一致)
+    // odom: 冻结/恢复即时发布仍使用 map→lidar_frame；冻结期不发布陈旧物理速度。
     if (publish_odom_) {
         auto odom_msg = std::make_unique<nav_msgs::msg::Odometry>();
-        odom_msg->header.stamp = stamp;
-        odom_msg->header.frame_id = map_frame_id_;
-        odom_msg->child_frame_id = base_frame_id_;
-        odom_msg->pose.pose = ToPoseMsg(frozen_T_map_base);
+        FillOdomMsg(*odom_msg, stamp, map_frame_id_, lidar_frame_id_, T_map_lidar, Vec3d::Zero());
         odom_pub_->publish(std::move(odom_msg));
     }
 
     // TF map → base_link: 冻结位姿 + 当前帧时间戳 (持续重广播)
-    if (publish_tf_) {
-        geometry_msgs::msg::TransformStamped tf_msg;
-        tf_msg.header.stamp = stamp;
-        tf_msg.header.frame_id = map_frame_id_;
-        tf_msg.child_frame_id = base_frame_id_;
-        tf_msg.transform.translation.x = frozen_T_map_base.translation().x();
-        tf_msg.transform.translation.y = frozen_T_map_base.translation().y();
-        tf_msg.transform.translation.z = frozen_T_map_base.translation().z();
-        const auto q = frozen_T_map_base.unit_quaternion();
-        tf_msg.transform.rotation.x = q.x();
-        tf_msg.transform.rotation.y = q.y();
-        tf_msg.transform.rotation.z = q.z();
-        tf_msg.transform.rotation.w = q.w();
-        tf_pub_->sendTransform(tf_msg);
-    }
+    PublishMapToBaseTF(T_map_lidar, stamp);
     // 冻结期 path 不追加 (防止发散轨迹污染路径)
 }
 
 void LocLiteNode::RecoverFromLost(const SE3& ndt_pose, double ts, double ndt_confidence, const char* reason) {
+    // bump reloc generation: 已恢复, 任何其它在飞 KISS worker 的迟到结果都作废 (位姿域已断裂)
+    ++reloc_gen_;
     lio_->ResetToMapPose(ndt_pose);
     smoother_.Reset();
     last_ndt_confidence_ = ndt_confidence;
@@ -1331,6 +1496,133 @@ void LocLiteNode::TryScRelocalize(const CloudPtr& scan, double ts, bool manual) 
 
     // Accept: reset to NDT-refined pose, 公共恢复收尾
     RecoverFromLost(ndt_res.pose, ts, ndt_res.confidence, "reloc_validated");
+}
+
+void LocLiteNode::MaybeDispatchKissReloc(const CloudPtr& scan, const SE3& current_imu_pose, double ts,
+                                         bool manual) {
+    // 至多一个在飞 worker: 在飞期间不再派发 (cooldown 之外的硬去重)
+    if (reloc_inflight_) {
+        return;
+    }
+    const double cooldown = reloc_->ScCooldownSec();
+    // cooldown: scan ts 域 (与 last_sc_attempt_ts_ 同域); 手动跳过
+    if (!manual && last_sc_attempt_ts_ >= 0.0 && ts - last_sc_attempt_ts_ < cooldown) {
+        return;
+    }
+    // blackout: /initialpose 后阻断自动重定位; 墙钟域 (deadline 由回调用墙钟设, 见 TryScRelocalize 注释)
+    const double wall_now = this->now().seconds();
+    if (!manual && wall_now < blackout_deadline_sec_) {
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                             "[KISS-Reloc] in blackout window (wall_now=%.3f < deadline=%.3f), skip",
+                             wall_now, blackout_deadline_sec_);
+        return;
+    }
+    // max_runtime: armed 过久则 disarm (异步路径绕过 TryRelocalize 内置检查, 此处自行判定); 墙钟域
+    if (!manual && reloc_->MaxRuntimeSec() > 0.0 &&
+        reloc_->ArmedElapsed(wall_now) > reloc_->MaxRuntimeSec()) {
+        RCLCPP_WARN(this->get_logger(), "[KISS-Reloc] max runtime exceeded (%.1f s), disarming",
+                    reloc_->MaxRuntimeSec());
+        reloc_->Disarm("max_runtime_exceeded");
+        return;
+    }
+
+    // 主线程持锁: 读 accum_buffer_ 构造 level 系查询云快照. 帧数不足返回 nullptr → 不消耗 cooldown
+    // (保留 LOST 窗口预算约定: 攒帧期间逐帧重试, 攒满即查). 见 runtime-and-relocalization spec.
+    CloudPtr query_level = reloc_->PrepareKissQueryLevel(scan, current_imu_pose, manual);
+    if (!query_level) {
+        return;
+    }
+    last_sc_attempt_ts_ = ts;  // 真正发起一次查询才消耗 cooldown
+    PublishKissAccumCloud();   // 主线程发布 KISS query(level) 调试云 (与 worker 同为只读, 安全)
+
+    // 快照 worker 所需输入: scan 深拷贝 (LatestDeskewedCloud 下帧可能被覆盖), pose 值传, gen.
+    reloc_scan_snapshot_.reset(new PointCloudType(*scan));
+    reloc_dispatch_gen_ = reloc_gen_;
+    reloc_dispatch_manual_ = manual;
+    reloc_dispatch_ts_ = ts;
+    reloc_inflight_ = true;
+
+    // per-attempt 工作线程 (launch::async 一次性跑完即退, 非持久后台 worker). 捕获 shared_ptr 副本
+    // 与值快照, 不碰 this/节点成员; logger 是可拷贝且线程安全的轻量句柄, 仅用于 worker 内异常上报.
+    auto reloc = reloc_;
+    auto ndt_reloc = ndt_reloc_;
+    CloudPtr query = query_level;
+    CloudPtr scan_snap = reloc_scan_snapshot_;
+    SE3 imu_pose = current_imu_pose;
+    const bool m = manual;
+    rclcpp::Logger logger = this->get_logger();
+    reloc_future_ = std::async(std::launch::async,
+                               [reloc, ndt_reloc, query, scan_snap, imu_pose, m, logger]() -> RelocCandidate {
+                                   DropThreadToNormalSched();  // 不抢占 RT spin 线程
+                                   try {
+                                       return reloc->MatchKissOnSnapshot(query, scan_snap, imu_pose,
+                                                                         ndt_reloc.get(), m);
+                                   } catch (const std::exception& e) {
+                                       RCLCPP_ERROR(logger, "[KISS-Reloc] worker exception: %s", e.what());
+                                       return RelocCandidate{};
+                                   } catch (...) {
+                                       RCLCPP_ERROR(logger, "[KISS-Reloc] worker unknown exception");
+                                       return RelocCandidate{};
+                                   }
+                               });
+    RCLCPP_INFO(this->get_logger(), "[KISS-Reloc] dispatched async worker (manual=%d, gen=%llu)",
+                manual ? 1 : 0, static_cast<unsigned long long>(reloc_dispatch_gen_));
+}
+
+bool LocLiteNode::CollectKissReloc(const CloudPtr& scan, double ts) {
+    if (!reloc_inflight_ || !reloc_future_.valid()) {
+        return false;
+    }
+    if (reloc_future_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+        return false;  // worker 仍在跑, 本帧不阻塞
+    }
+
+    const RelocCandidate candidate = reloc_future_.get();  // 取走后 future 失效
+    reloc_inflight_ = false;
+    const double dt_query = (reloc_dispatch_ts_ >= 0.0 && ts >= reloc_dispatch_ts_) ? ts - reloc_dispatch_ts_ : -1.0;
+
+    // gen 守卫: 期间发生过 /initialpose 或其它恢复 → 候选作废 (位姿域已变)
+    if (reloc_dispatch_gen_ != reloc_gen_) {
+        RCLCPP_INFO(this->get_logger(),
+                    "[KISS-Reloc] worker result discarded (stale gen %llu != %llu, query took %.2fs)",
+                    static_cast<unsigned long long>(reloc_dispatch_gen_),
+                    static_cast<unsigned long long>(reloc_gen_), dt_query);
+        return false;
+    }
+    // 自动触发: 仅在仍需重定位的状态应用 (Lost / WaitForInitialPose / Uninitialized), 已恢复/初始化中则放弃.
+    // 手动触发 (用户显式授权): 任意状态都应用 (含从 GOOD 强制重定位, 对齐旧同步手动语义).
+    const auto st = state_machine_.State();
+    if (!reloc_dispatch_manual_ && st != LiteLocState::Lost &&
+        st != LiteLocState::WaitForInitialPose && st != LiteLocState::Uninitialized) {
+        RCLCPP_INFO(this->get_logger(), "[KISS-Reloc] worker result discarded (state=%s no longer needs reloc)",
+                    state_machine_.StateStr());
+        return false;
+    }
+    if (!candidate.valid) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 3000,
+                             "[KISS-Reloc] worker returned no valid candidate (query took %.2fs), retry after cooldown",
+                             dt_query);
+        return false;
+    }
+
+    // 用当前帧实时 scan 复核候选 (抗 KISS 耗时期间机器人移动产生的陈旧候选; validate 单次 align 有界)
+    const NdtResult ndt_res = ndt_->Validate(candidate.pose, scan, reloc_->RelocMaxDeltaTransM(),
+                                             reloc_->RelocMaxDeltaRotDeg());
+    if (!ndt_res.valid) {
+        RCLCPP_WARN(this->get_logger(),
+                    "[KISS-Reloc] candidate rejected by NDT re-validation on current scan "
+                    "(conf=%.3f, dt=%.3f m, dr=%.2f deg, query took %.2fs)",
+                    ndt_res.confidence, ndt_res.delta_trans_m, ndt_res.delta_rot_deg, dt_query);
+        return false;
+    }
+
+    RCLCPP_INFO(this->get_logger(), "[KISS-Reloc] async recovery accepted (TP=%.3f, query took %.2fs)",
+                ndt_res.confidence, dt_query);
+    RecoverFromLost(ndt_res.pose, ts, ndt_res.confidence, "kiss_async_validated");
+    // 发布恢复后位姿 (避免发散 LIO 一帧毛刺), 与 NDT-LocalRecovery 路径一致
+    PublishPose(ndt_res.pose, ts);
+    PublishStatusTopics(ts);
+    return true;
 }
 
 void LocLiteNode::PublishScDebugTopics() {

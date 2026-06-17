@@ -3,6 +3,8 @@
 #ifndef HIKARI_LOCLITE_NODE_HPP
 #define HIKARI_LOCLITE_NODE_HPP
 
+#include <cstdint>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -75,17 +77,31 @@ class LocLiteNode : public rclcpp::Node {
     CloudPtr BuildInitAccumulatedCloud() const;
     /// Good 态低频 NDT 漂移校正 (按时间间隔节流, 设计文档第 14 节)
     void MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, double ts);
-    /// SC 重定位尝试 (LOST 态 or cold start), 持锁调用
+    /// SC 重定位尝试 (LOST 态 or cold start), 持锁调用. backend=sc 时仍走此同步路径
+    /// (SC 查询轻量); backend=kiss 改走 MaybeDispatchKissReloc + CollectKissReloc 异步路径.
     void TryScRelocalize(const CloudPtr& scan, double ts, bool manual = false);
+    /// KISS backend 异步派发 (持锁): 过 cooldown/blackout/max_runtime/帧数门后, 主线程快照查询云+scan+pose,
+    /// 把 KISS 全局配准 (单次可达秒级) 丢到 per-attempt 工作线程, spin 线程不阻塞. 至多一个在飞 worker.
+    void MaybeDispatchKissReloc(const CloudPtr& scan, const SE3& current_imu_pose, double ts, bool manual);
+    /// KISS backend 异步收尾 (持锁, 每帧 poll): worker 出结果且 gen 匹配 → 用当前帧 scan 做 NDT 复核
+    /// (抗 KISS 耗时期间机器人移动的陈旧候选) → RecoverFromLost + 发布. 返回 true 表示本帧已应用恢复并发布.
+    bool CollectKissReloc(const CloudPtr& scan, double ts);
     /// 发布 SC 调试话题 (仅在有订阅者时发布)
     void PublishScDebugTopics();
     /// 发布 KISS query(level) 累积云到 sc/accum_cloud (复用 SC 话题, 仅在有订阅者时发布)
     void PublishKissAccumCloud();
 
-    /// odom + TF(map→base_link) + path
+    /// odom(map→lidar_frame, twist in lidar_frame) + TF(map→base_link) + path
     void PublishPose(const NavState& state);
-    /// 冻结态发布: LOST/WAIT 期间用冻结位姿 + 当前时间戳重广播 (path 不追加)
-    void PublishPose(const SE3& frozen_T_map_base, double ts);
+    /// 即时发布 map→lidar 位姿: LOST/恢复路径重广播当前时间戳, twist 置零且 path 不追加
+    void PublishPose(const SE3& T_map_lidar, double ts);
+    /// 仅发布 TF map→base_link (雷达帧/IMU 外推共用)
+    void PublishMapToBaseTF(const SE3& T_map_lidar, const rclcpp::Time& stamp);
+    /// 雷达帧可信输出后 seed IMU 外推 TF 状态
+    void SeedImuTfExtrapolator(const NavState& state);
+    /// 每条 IMU 后短时外推并发布 map→base_link TF (不改 LIO/ESKF 状态)
+    void MaybePublishImuExtrapolatedTF(const sensor_msgs::msg::Imu& msg);
+    bool ImuTfExtrapolationStateAllowsPublish() const;
     /// loc_state + ndt_status + loc_status marker
     void PublishStatusTopics(double ts);
     void PublishStatusMarker(double ts);
@@ -126,6 +142,15 @@ class LocLiteNode : public rclcpp::Node {
     bool publish_path_ = true;  // runtime.publish_path: hikari_loc/path (契约默认开启)
     bool publish_pcdmap_ = false;  // runtime.publish_pcdmap: /pcdmap 原始 PCD 降采样地图
     static constexpr size_t kMaxPathPoses = 5000;
+
+    // --- IMU 外推 TF 发布 (runtime.imu_extrapolate_*) ---
+    bool imu_extrapolate_tf_ = false;              // 只加速 TF, odom 仍保持 lidar-rate
+    double imu_extrapolate_max_dt_sec_ = 0.05;     // 单步 IMU dt 上限, 防时间跳变/掉帧
+    double imu_extrapolate_max_ahead_sec_ = 0.20;  // 相对最近 lidar 校正的最大外推窗口
+    bool imu_tf_extrapolator_valid_ = false;
+    NavState imu_tf_extrapolated_state_;
+    double imu_tf_last_lidar_ts_ = -1.0;           // 最近一次 lidar-rate seed 的 scan 时间
+    double imu_tf_last_publish_ts_ = -1.0;         // 最近一次 map→base TF stamp, 防 TF_REPEATED_DATA/回退
 
     // --- 输入掉线 watchdog + 富状态上报 (runtime.*) ---
     bool watchdog_enabled_ = true;       // runtime.watchdog_enabled: IMU/Lidar 掉线检测
@@ -183,6 +208,18 @@ class LocLiteNode : public rclcpp::Node {
     double input_stale_since_wall_ = -1.0;  // 输入掉线起始时刻 (-1 = 未掉线), 用于告警持续时长
     double last_frame_wall_ts_ = -1.0;    // 上一帧 LIO 产出时刻, 算 fps
     double frame_fps_ = 0.0;              // LIO 输出帧率 EWMA
+
+    // --- 异步 KISS 重定位 worker (per-attempt 一次性线程, 非持久后台 worker; 仅 backend=kiss) ---
+    // KISS 全局配准单次可达秒级, 直接跑在单线程 spin 上会(1)把深度1的 lidar 队列后所有处理推迟成常驻延迟,
+    // (2)饿死同 executor 的 watchdog 误判雷达丢失. 故把重活丢到工作线程, 主线程只快照输入/收尾应用.
+    NdtCorrector::Ptr ndt_reloc_;                 // worker 专用独立 NDT 实例 (与主 ndt_ 零共享; yaw 微扫/复核)
+    std::future<RelocCandidate> reloc_future_;    // 在飞 worker 句柄 (launch::async; 析构会 join)
+    bool reloc_inflight_ = false;                 // 是否有在飞 worker (同一时刻至多一个)
+    std::uint64_t reloc_gen_ = 0;                 // 守卫: /initialpose / 成功恢复时 bump; 迟到结果 gen 不符则丢弃
+    std::uint64_t reloc_dispatch_gen_ = 0;        // 派发时快照的 gen
+    CloudPtr reloc_scan_snapshot_;                // 派发时深拷贝的当前帧去畸变云 (worker yaw 微扫 NDT 用)
+    bool reloc_dispatch_manual_ = false;          // 本次在飞是否手动触发 (仅日志)
+    double reloc_dispatch_ts_ = -1.0;             // 派发时刻 (scan 时间域, 仅日志)
 
     // --- 组件 ---
     FastLioFixedMap::Ptr lio_;

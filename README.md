@@ -166,7 +166,7 @@ ros2 run hikari_loclite run_loclite_offline \
 
 | Topic | Type | 说明 |
 | --- | --- | --- |
-| `hikari_loc/odom` | `nav_msgs/msg/Odometry` | 定位里程计 |
+| `hikari_loc/odom` | `nav_msgs/msg/Odometry` | 定位里程计，pose 为 `map -> lidar_frame_id`，linear twist 为 ESKF 速度旋转到 `child_frame_id`；angular twist 和 covariance 当前不提供 |
 | `hikari_loc/path` | `nav_msgs/msg/Path` | 轨迹路径 |
 | `hikari_loc/loc_state` | `std_msgs/msg/Int32` | 定位状态枚举 |
 | `hikari_loc/ndt_status` | `std_msgs/msg/Int32` | NDT 状态 |
@@ -405,7 +405,7 @@ Default publications:
 
 | Topic | Type | Description |
 | --- | --- | --- |
-| `hikari_loc/odom` | `nav_msgs/msg/Odometry` | Localization odometry |
+| `hikari_loc/odom` | `nav_msgs/msg/Odometry` | Localization odometry. Pose is `map -> lidar_frame_id`; linear twist is ESKF velocity rotated into `child_frame_id`; angular twist and covariance are currently unavailable |
 | `hikari_loc/path` | `nav_msgs/msg/Path` | Pose path |
 | `hikari_loc/loc_state` | `std_msgs/msg/Int32` | Localization state enum |
 | `hikari_loc/ndt_status` | `std_msgs/msg/Int32` | NDT status |
