@@ -62,6 +62,10 @@
 
 `rosbag2_cpp` 只用于非 Release 构建中的 `run_loclite_offline` 离线评估节点。Release 构建不会编译或安装离线节点。
 
+### 开源库和参考项目
+
+本项目使用或 vendored 的 GitHub 开源库包括 [KISS-Matcher](https://github.com/MIT-SPARK/KISS-Matcher)、Sophus、nanoflann 等；实现上参考了 `lightning-lm` 的固定地图定位、NDT、Scan Context 和稳定门控链路，第三方代码仍遵循其各自许可证。
+
 ### 构建
 
 在 ROS 2 工作空间中构建：
@@ -239,6 +243,10 @@ sudo systemctl enable --now hikari-loclite
 - `ndt.min_confidence`、`system.stability_gate_conf_upper_thres`、SC 参数和 ZUPT 参数都应按现场地图和传感器重新标定。
 - CPU 亲和和实时调度通过 YAML 中 `system.rt_*` 控制；无权限时节点会降级为普通调度并继续运行。
 
+### 许可证
+
+本仓库采用 MIT 许可证，见 [LICENSE](LICENSE)。第三方代码和 vendored 依赖仍遵循其各自许可证文件。
+
 ## English
 
 `hikari_loclite` is a lightweight ROS 2 fixed-map LiDAR localization package for embedded deployment. It consumes Livox Mid360 or generic `PointCloud2` point clouds plus IMU data, then publishes odometry, path, TF, and localization status in the `map` frame.
@@ -300,6 +308,10 @@ Core dependencies:
 - OpenMP
 
 `rosbag2_cpp` is used only by the non-Release `run_loclite_offline` evaluation binary. Release builds do not compile or install the offline node.
+
+### Open-Source Libraries and References
+
+This project uses or vendors GitHub open-source libraries including [KISS-Matcher](https://github.com/MIT-SPARK/KISS-Matcher), Sophus, and nanoflann. Its implementation also references `lightning-lm` fixed-map localization, NDT, Scan Context, and stability-gate flows. Third-party code remains governed by its own license files.
 
 ### Build
 
@@ -477,3 +489,7 @@ For field deployment, point `HIKARI_LOCLITE_CONFIG` in the unit to the calibrate
 - Fixed-map localization must not insert live scan points into the map.
 - `ndt.min_confidence`, `system.stability_gate_conf_upper_thres`, Scan Context parameters, and ZUPT parameters should be recalibrated for each field map and sensor setup.
 - CPU affinity and realtime scheduling are configured through YAML `system.rt_*` keys. If permissions are missing, the node falls back to normal scheduling and continues running.
+
+### License
+
+This repository is released under the MIT License. See [LICENSE](LICENSE). Third-party code and vendored dependencies remain under their respective license files.

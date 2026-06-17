@@ -5,7 +5,7 @@
   <version>0.1.0</version>
   <description>Lightweight fixed-map LiDAR localization for embedded deployment.</description>
   <maintainer email="dev@example.com">hikari</maintainer>
-  <license>Proprietary</license>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
