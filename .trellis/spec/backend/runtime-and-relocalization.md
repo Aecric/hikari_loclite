@@ -226,6 +226,13 @@ immediately Good" behavior. Reset the gate on every `ResetToMapPose()` path
   (only meaningful for `kiss`). Target is the whole `global.pcd` pre-voxelized
   and cached as `vector<Vec3f>`; small map needs no crop. `max_target_pts` guard
   warns-and-skips (target stays not-ready) rather than crashing on a huge map.
+- `RelocCooldownSec()` (config `reloc.reloc_cooldown_sec`, old
+  `sc_cooldown_sec` still read as fallback) is shared by KISS and SC automatic
+  attempts. Do not put shared scheduling keys under SC-only comments.
+- `QueryAccumFrames()` and the query accumulation config
+  (`reloc.query_accum_frames`, `reloc.query_accum_voxel_leaf`,
+  `reloc.query_accum_max_rel_trans_m`; old `sc_accum_*` keys still read as
+  fallback) are shared by KISS and SC.
 - `RelocMaxDeltaTransM()` / `RelocMaxDeltaRotDeg()` (config
   `reloc.reloc_max_delta_*`, renamed from `sc_max_delta_*`, old keys still read
   as fallback) — shared NDT-validation delta gate for both backends; wider than
@@ -285,24 +292,24 @@ time during replay — can be weeks behind) and **wall clock**
   so after one `/initialpose` automatic SC was **permanently** blacked out —
   invisible on the real robot (scan ts ≈ wall), fatal for every bag-based SC
   test. Fixed in commit 3a6e9b8.
-- SC cooldown: `ts` vs `last_sc_attempt_ts_` (both scan time) — consistent.
-- SC runtime limit / Arm timestamps: wall vs wall — consistent.
+- Reloc cooldown: `ts` vs `last_sc_attempt_ts_` (both scan time) — consistent.
+  The member name is historical; KISS also uses it.
+- Reloc runtime limit / Arm timestamps: wall vs wall — consistent.
 
 When adding any new timer/deadline, state the domain in the member's comment
 (see `blackout_deadline_sec_`) and log both sides on the skip path.
 
-### SC attempt cadence (LOST window budget)
+### Reloc attempt cadence (LOST window budget)
 
 The LOST window is only `system.lost_timeout_sec` (5 s) long before the node
-disarms SC and drops to `WAIT_FOR_INITIALPOSE`. Budget inside it:
+disarms relocalization and drops to `WAIT_FOR_INITIALPOSE`. Budget inside it:
 Arm clears the accumulation buffer → buffer refills at frame rate
 (~2 s for 20 frames) → first real query must fire immediately after.
-Therefore the **insufficient-frames skip must not consume the SC cooldown**:
-`last_sc_attempt_ts_` is written only when `QueryTopK` actually runs
-(order in `TryScRelocalize`: cooldown check → blackout check → frames check
-(no cooldown write) → record attempt ts → real query). The original ordering
-burned the only in-window attempt on a `frames=1/20` skip and SC never queried
-before WAIT.
+Therefore the **insufficient-frames skip must not consume the reloc cooldown**:
+`last_sc_attempt_ts_` is written only when a real backend query is dispatched
+or executed (KISS async worker dispatch / SC `QueryTopK`). The original SC
+ordering burned the only in-window attempt on a `frames=1/20` skip and SC never
+queried before WAIT; the same budget rule applies to KISS query dispatch.
 
 ## Pose Output Gating
 

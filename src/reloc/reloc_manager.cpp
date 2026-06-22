@@ -34,16 +34,24 @@ bool RelocManager::Init(const std::string& yaml_path, const std::string& map_dir
             disable_after_good_ = reloc["disable_after_good"].as<bool>(true);
             sc_enabled_ = reloc["sc_enabled"].as<bool>(true);
             sc_top_k_ = reloc["sc_top_k"].as<int>(1);
-            sc_cooldown_sec_ = reloc["sc_cooldown_sec"].as<double>(5.0);
+            const double legacy_cooldown_sec = reloc["sc_cooldown_sec"].as<double>(5.0);
+            reloc_cooldown_sec_ = reloc["reloc_cooldown_sec"].as<double>(legacy_cooldown_sec);
             max_runtime_sec_ = reloc["max_runtime_sec"].as<double>(10.0);
             gravity_roll_thres_deg_ = reloc["gravity_roll_thres_deg"].as<double>(30.0);
             gravity_pitch_thres_deg_ = reloc["gravity_pitch_thres_deg"].as<double>(30.0);
 
-            // 查询点云滚动累积 (Phase 3): 单帧太稀, 倾斜安装下描述子不稳定. 两 backend 共用累积.
-            sc_accum_frames_ = reloc["sc_accum_frames"].as<int>(20);
-            sc_accum_voxel_leaf_ = reloc["sc_accum_voxel_leaf"].as<double>(0.1);
+            // 查询点云滚动累积: 单帧太稀, 倾斜安装下 KISS/SC 查询都不稳定. 两 backend 共用累积.
+            // 新键 query_accum_*; 旧键 sc_accum_* 保留兼容读取 (旧键存在时作为后备默认).
+            const int legacy_accum_frames = reloc["sc_accum_frames"].as<int>(20);
+            const double legacy_accum_voxel_leaf = reloc["sc_accum_voxel_leaf"].as<double>(0.1);
+            const double legacy_accum_max_rel_trans_m =
+                reloc["sc_accum_max_rel_trans_m"].as<double>(1.0);
+            query_accum_frames_ = reloc["query_accum_frames"].as<int>(legacy_accum_frames);
+            query_accum_voxel_leaf_ =
+                reloc["query_accum_voxel_leaf"].as<double>(legacy_accum_voxel_leaf);
             // 累积发散守门 (C3): LOST 后 LIO 速度积分跑飞时相对位姿不可用于拼接
-            sc_accum_max_rel_trans_m_ = reloc["sc_accum_max_rel_trans_m"].as<double>(1.0);
+            query_accum_max_rel_trans_m_ =
+                reloc["query_accum_max_rel_trans_m"].as<double>(legacy_accum_max_rel_trans_m);
 
             // 候选 NDT 验证专用 delta 门限 (C1): ndt.max_delta_* 按 /initialpose 量纲设定,
             // 对 SC/KISS 候选过紧 (sector 6° 量化 + 关键帧间距; KISS yaw 微扫起点偏移). 两 backend 共用.
@@ -133,10 +141,10 @@ bool RelocManager::Init(const std::string& yaml_path, const std::string& map_dir
               << ", disable_after_good=" << disable_after_good_
               << ", sc_enabled=" << sc_enabled_
               << ", sc_top_k=" << sc_top_k_
-              << ", sc_cooldown_sec=" << sc_cooldown_sec_
-              << ", sc_accum_frames=" << sc_accum_frames_
-              << ", sc_accum_voxel_leaf=" << sc_accum_voxel_leaf_
-              << ", sc_accum_max_rel_trans_m=" << sc_accum_max_rel_trans_m_
+              << ", reloc_cooldown_sec=" << reloc_cooldown_sec_
+              << ", query_accum_frames=" << query_accum_frames_
+              << ", query_accum_voxel_leaf=" << query_accum_voxel_leaf_
+              << ", query_accum_max_rel_trans_m=" << query_accum_max_rel_trans_m_
               << ", reloc_max_delta=" << reloc_max_delta_trans_m_ << "m/" << reloc_max_delta_rot_deg_ << "deg"
               << ", yaw_refine=±" << yaw_refine_range_deg_ << "@" << yaw_refine_step_deg_ << "deg"
               << ", poses=" << kf_poses_.size();
@@ -195,21 +203,21 @@ void RelocManager::Disarm(const char* reason) {
 
 void RelocManager::AccumulateScan(const CloudPtr& scan, const SE3& lidar_pose) {
     // 累积缓冲两 backend 共用 (KISS query 与 SC query 都用累积 + 重力对齐云).
-    if (!RelocReady() || sc_accum_frames_ <= 1) return;
+    if (!RelocReady() || query_accum_frames_ <= 1) return;
     if (!scan || scan->empty()) return;
 
     // 发散守门 (C3): LOST 后 LIO 速度积分可能跑飞 (实测每帧位移 ~5m), 此时"短时局部自洽"
     // 假设失效, 按相对位姿拼接会糊掉查询云. 与上一入队帧相对平移超限则不入队;
     // 不清空缓冲 — 连续超限说明 LIO 已不可用于拼接, 保留旧帧, 环形 pop 自然换血.
-    if (!accum_buffer_.empty() && sc_accum_max_rel_trans_m_ > 0.0) {
+    if (!accum_buffer_.empty() && query_accum_max_rel_trans_m_ > 0.0) {
         const double rel_trans =
             (accum_buffer_.back().pose.inverse() * lidar_pose).translation().norm();
-        if (rel_trans > sc_accum_max_rel_trans_m_) {
+        if (rel_trans > query_accum_max_rel_trans_m_) {
             ++accum_reject_count_;
             // 节流: 每个发散片段首帧 + 之后每 20 帧打一条
             if (accum_reject_count_ == 1 || accum_reject_count_ % 20 == 0) {
                 LOG(WARNING) << "[RelocManager] accum frame rejected: rel_trans=" << rel_trans
-                             << " m > sc_accum_max_rel_trans_m=" << sc_accum_max_rel_trans_m_
+                             << " m > query_accum_max_rel_trans_m=" << query_accum_max_rel_trans_m_
                              << " m (LIO likely diverged, rejected=" << accum_reject_count_
                              << " consecutive)";
             }
@@ -218,13 +226,13 @@ void RelocManager::AccumulateScan(const CloudPtr& scan, const SE3& lidar_pose) {
         accum_reject_count_ = 0;
     }
 
-    // 每帧开销仅为降采样 + 入队 (嵌入式预算内); 合并/对齐/查询在 SC 尝试节奏发生
+    // 每帧开销仅为降采样 + 入队 (嵌入式预算内); 合并/对齐/查询在重定位尝试节奏发生
     AccumFrame frame;
     frame.pose = lidar_pose;
     frame.cloud.reset(new PointCloudType());
-    if (sc_accum_voxel_leaf_ > 0.0) {
+    if (query_accum_voxel_leaf_ > 0.0) {
         pcl::VoxelGrid<PointType> voxel;
-        const float leaf = static_cast<float>(sc_accum_voxel_leaf_);
+        const float leaf = static_cast<float>(query_accum_voxel_leaf_);
         voxel.setLeafSize(leaf, leaf, leaf);
         voxel.setInputCloud(scan);
         voxel.filter(*frame.cloud);
@@ -233,7 +241,7 @@ void RelocManager::AccumulateScan(const CloudPtr& scan, const SE3& lidar_pose) {
     }
 
     accum_buffer_.push_back(std::move(frame));
-    while (static_cast<int>(accum_buffer_.size()) > sc_accum_frames_) {
+    while (static_cast<int>(accum_buffer_.size()) > query_accum_frames_) {
         accum_buffer_.pop_front();
     }
 }
@@ -257,11 +265,11 @@ CloudPtr RelocManager::BuildAccumulatedQueryCloud() const {
         *merged += *transformed;
     }
 
-    if (sc_accum_voxel_leaf_ <= 0.0) return merged;
+    if (query_accum_voxel_leaf_ <= 0.0) return merged;
     // 合并后再降采样一次, 控制 QueryTopK 输入规模
     CloudPtr filtered(new PointCloudType());
     pcl::VoxelGrid<PointType> voxel;
-    const float leaf = static_cast<float>(sc_accum_voxel_leaf_);
+    const float leaf = static_cast<float>(query_accum_voxel_leaf_);
     voxel.setLeafSize(leaf, leaf, leaf);
     voxel.setInputCloud(merged);
     voxel.filter(*filtered);
@@ -368,17 +376,17 @@ RelocCandidate RelocManager::RunScanContextOnce(const CloudPtr& scan, const SE3&
     // Step 1: 构造查询点云 — 优先滚动累积合并 (单帧太稀, 倾斜安装下 SC 描述子不稳定)
     CloudPtr query_cloud;
     const int accum_frames = AccumulatedFrames();
-    if (sc_accum_frames_ > 1) {
-        if (accum_frames >= sc_accum_frames_) {
+    if (query_accum_frames_ > 1) {
+        if (accum_frames >= query_accum_frames_) {
             query_cloud = BuildAccumulatedQueryCloud();
         } else if (manual) {
             // 手动触发不等累积: 用户显式授权, 缓冲不足时退回单帧立即尝试
             LOG(WARNING) << "[SC-Reloc] manual SC with insufficient accumulation (frames=" << accum_frames
-                         << "/" << sc_accum_frames_ << "), falling back to single scan";
+                         << "/" << query_accum_frames_ << "), falling back to single scan";
             query_cloud = scan;
         } else {
             // 帧数不足: 跳过本次尝试, 等下个 cooldown 周期 (缓冲由逐帧 AccumulateScan 继续填充)
-            LOG(INFO) << "[SC-Reloc] accumulating frames=" << accum_frames << "/" << sc_accum_frames_
+            LOG(INFO) << "[SC-Reloc] accumulating frames=" << accum_frames << "/" << query_accum_frames_
                       << ", skipping this attempt";
             return result;
         }
@@ -479,18 +487,18 @@ CloudPtr RelocManager::PrepareKissQueryLevel(const CloudPtr& scan, const SE3& cu
         return nullptr;
     }
 
-    // Step 1: 构造查询点云 — 复用 SC 路径同款滚动累积 (单帧太稀, 倾斜安装下特征不稳定)
+    // Step 1: 构造查询点云 — 复用共享滚动累积 (单帧太稀, 倾斜安装下特征不稳定)
     CloudPtr query_cloud;
     const int accum_frames = AccumulatedFrames();
-    if (sc_accum_frames_ > 1) {
-        if (accum_frames >= sc_accum_frames_) {
+    if (query_accum_frames_ > 1) {
+        if (accum_frames >= query_accum_frames_) {
             query_cloud = BuildAccumulatedQueryCloud();
         } else if (manual) {
             LOG(WARNING) << "[KISS-Reloc] manual KISS with insufficient accumulation (frames=" << accum_frames
-                         << "/" << sc_accum_frames_ << "), falling back to single scan";
+                         << "/" << query_accum_frames_ << "), falling back to single scan";
             query_cloud = scan;
         } else {
-            LOG(INFO) << "[KISS-Reloc] accumulating frames=" << accum_frames << "/" << sc_accum_frames_
+            LOG(INFO) << "[KISS-Reloc] accumulating frames=" << accum_frames << "/" << query_accum_frames_
                       << ", skipping this attempt";
             return nullptr;
         }

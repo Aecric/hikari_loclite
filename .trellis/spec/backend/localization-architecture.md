@@ -191,14 +191,16 @@ any one of them produced empty/never-matching candidates on zt_5201_map:
    `TryScanContextRelocalization`). Implemented in
    `RelocManager::GravityAlignCloud`.
 2. **Frame accumulation**: a single Mid360 scan is too sparse for a stable
-   descriptor. Accumulate `reloc.sc_accum_frames` (default 20) voxel-downsampled
-   deskewed scans, stitched into the latest frame's body frame via relative LIO
+   descriptor. Accumulate `reloc.query_accum_frames` (default 20)
+   voxel-downsampled deskewed scans, stitched into the latest frame's body frame via relative LIO
    poses (`T_latest^-1 * T_i`). LIO is only locally consistent — guard stitching
-   with `reloc.sc_accum_max_rel_trans_m` (default 1.0 m): frames whose relative
-   translation to the last enqueued frame exceeds the gate are dropped, because
-   a diverged LIO (measured ~5 m/frame runaway after LOST) smears the merged
-   cloud into garbage. Clear the buffer on every `ResetToMapPose()` path and on
-   Arm/Disarm (pose-domain break would corrupt stitching).
+   with `reloc.query_accum_max_rel_trans_m` (default 1.0 m): frames whose
+   relative translation to the last enqueued frame exceeds the gate are dropped,
+   because a diverged LIO (measured ~5 m/frame runaway after LOST) smears the
+   merged cloud into garbage. These query accumulation keys are shared by KISS
+   and SC; legacy `sc_accum_*` keys are read only as compatibility fallbacks.
+   Clear the buffer on every `ResetToMapPose()` path and on Arm/Disarm
+   (pose-domain break would corrupt stitching).
 3. **DB-matched descriptor params**: the SC database file stores ring/sector
    dims but **NOT** `pc_max_radius` / `lidar_height`. The query side must set
    them in yaml to the values the DB was built with (lightning scan_context:
@@ -219,11 +221,12 @@ normal, so the `/initialpose`-calibrated `ndt.max_delta_*` gates (1 m/10°) are
 structurally too tight for SC candidates.
 
 **Decision**: `NdtCorrector::Validate` takes optional per-call gate overrides
-(`<=0` falls back to the member `ndt.*` gates). SC validation call sites pass
-`reloc.sc_max_delta_trans_m` (default 2.0) / `reloc.sc_max_delta_rot_deg`
-(default 15.0); the `/initialpose` site keeps the member gates. Accept/reject
-logs print the effective gates so field logs are unambiguous about which gate
-set was applied.
+(`<=0` falls back to the member `ndt.*` gates). Relocalization validation call
+sites pass `reloc.reloc_max_delta_trans_m` (default 2.0) /
+`reloc.reloc_max_delta_rot_deg` (default 15.0); legacy `sc_max_delta_*` keys are
+read only as compatibility fallbacks. The `/initialpose` site keeps the member
+gates. Accept/reject logs print the effective gates so field logs are
+unambiguous about which gate set was applied.
 
 #### Wrong
 

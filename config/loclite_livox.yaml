@@ -68,14 +68,23 @@ reloc:
   yaw_refine_range_deg: 9.0            # KISS 粗解后 yaw 微扫范围 ±deg (退化场景保险丝)
   yaw_refine_step_deg: 3.0             # yaw 微扫步长 deg; 逐起点跑 NDT.Validate 取最佳 TP
 
-  # ==== SC 重定位 (Phase 5; 仅 reloc_backend=sc 时加载/运行) ====
-  sc_enabled: true                      # 是否启用 Scan Context 重定位
-  auto_on_init: true                    # 冷启动时自动尝试 SC (不依赖 /initialpose)
-  auto_on_lost: false                    # LOST 态自动 arm SC 恢复
-  disable_after_good: true              # Good 态 disarm SC, 不消耗 CPU
+  # ==== 重定位自动触发/调度 (KISS / SC 共用) ====
+  auto_on_init: true                    # 冷启动时自动尝试当前 backend (不依赖 /initialpose)
+  auto_on_lost: false                   # LOST 态是否自动 arm 当前 backend 恢复
+  disable_after_good: true              # Good 态 disarm reloc, 不消耗 CPU
+  reloc_cooldown_sec: 3.0               # 两次真实重定位查询之间的冷却时间 (秒); 代码兼容旧键 sc_cooldown_sec
+  max_runtime_sec: 20.0                 # 自动重定位 armed 后最大总运行窗口 (秒); 手动触发不受此限制
+
+  # ==== 重定位查询点云滚动累积 (KISS / SC 共用) ====
+  # armed (init/LOST) 期间逐帧体素降采样入环形缓冲; 查询时按相对 LIO 位姿统一到最新帧 body 系,
+  # 合并 + 重力对齐后送入 KISS/SC. 帧数不足时跳过尝试且不消耗 cooldown.
+  query_accum_frames: 20                # 滚动累积帧数 (单帧太稀, 倾斜安装下 KISS/SC 查询都不稳定)
+  query_accum_voxel_leaf: 0.1           # 累积帧入队前 + 合并后的体素降采样 leaf (m); 控制 20 帧合计点数在几万点级
+  query_accum_max_rel_trans_m: 1.0      # 累积发散守门: 与上一入队帧相对平移超此值不入队; 代码兼容旧键 sc_accum_*
+
+  # ==== SC 回退后端 (仅 reloc_backend=sc 时加载/运行) ====
+  sc_enabled: true                      # 是否启用 Scan Context 回退后端
   sc_top_k: 5                           # SC QueryTopK 候选数 (原 1; 多候选 + 重力检查 + NDT 验证逐个过滤)
-  sc_cooldown_sec: 3.0                  # SC 尝试冷却时间 (秒)
-  max_runtime_sec: 20.0                 # SC 重定位最大运行时间 (秒)
   sc_database: ""                       # SC 数据库路径; 为空时自动从 map_path/sc_database.bin 加载
   poses_txt: ""                         # 关键帧位姿路径; 为空时自动从 map_path/poses.txt 加载
   gravity_roll_thres_deg: 30.0          # SC 候选重力 roll 一致性阈值 (度)
@@ -87,11 +96,6 @@ reloc:
   sc_pc_max_radius: 15.0                # SC 极坐标最大半径 (m); 必须与建库参数一致 (代码默认 80.0 错配)
   sc_lidar_height: 1.0                  # SC 建库雷达高度 (m); 必须与建库参数一致 (代码默认 2.0 错配)
   sc_dist_thres: 0.18                   # SC 距离阈值; lightning 同图实测可用值 (代码默认 0.13 过严)
-  # 查询点云滚动累积: armed (init/LOST) 期间逐帧体素降采样入环形缓冲, SC 尝试时按相对 LIO
-  # 位姿统一到最新帧 body 系合并 + 重力对齐后查询; 帧数不足时跳过尝试等下个 cooldown.
-  sc_accum_frames: 20                   # 滚动累积帧数 (单帧太稀, 倾斜安装下 SC 描述子不稳定)
-  sc_accum_voxel_leaf: 0.1              # 累积帧入队前 + 合并后的体素降采样 leaf (m); 控制 20 帧合计点数在几万点级
-  sc_accum_max_rel_trans_m: 1.0         # 累积发散守门: 与上一入队帧相对平移超此值不入队 (LOST 后 LIO 速度积分跑飞实测 ~5m/帧, 拼接糊掉查询云); 不清空缓冲, 环形 pop 自然换血
 
   # ==== 重定位候选验证专用 delta 门限 (KISS / SC 共用) ====
   # 仅重定位候选验证使用; /initialpose 验证保持 ndt.max_delta_* 原门限.

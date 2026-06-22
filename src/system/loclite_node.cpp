@@ -1436,7 +1436,7 @@ void LocLiteNode::PublishPcdMap() {
 
 void LocLiteNode::TryScRelocalize(const CloudPtr& scan, double ts, bool manual) {
     // Cooldown check: avoid running SC every frame (skip for manual requests)
-    const double cooldown = reloc_->ScCooldownSec();
+    const double cooldown = reloc_->RelocCooldownSec();
     if (!manual && last_sc_attempt_ts_ >= 0.0 && ts - last_sc_attempt_ts_ < cooldown) {
         return;
     }
@@ -1456,11 +1456,11 @@ void LocLiteNode::TryScRelocalize(const CloudPtr& scan, double ts, bool manual) 
     // 否则 Arm 后首次尝试 (frames=1/N) 即烧掉一个 cooldown 周期, 缓冲攒满 (~2s) 后还要再等
     // 5s, LOST 窗口 (lost_timeout_sec=5s) 内抢不到一次真查询. 此处提前判帧数, 不足直接 return,
     // 缓冲由逐帧 AccumulateScan 继续填充, 攒满即查. (manual 走 RunScanContextOnce 单帧回退)
-    if (!manual && reloc_->ScAccumFrames() > 1 &&
-        reloc_->AccumulatedFrames() < reloc_->ScAccumFrames()) {
+    if (!manual && reloc_->QueryAccumFrames() > 1 &&
+        reloc_->AccumulatedFrames() < reloc_->QueryAccumFrames()) {
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                              "[SC-Reloc] accumulating frames=%d/%d, skip without consuming cooldown",
-                             reloc_->AccumulatedFrames(), reloc_->ScAccumFrames());
+                             reloc_->AccumulatedFrames(), reloc_->QueryAccumFrames());
         return;
     }
     last_sc_attempt_ts_ = ts;
@@ -1508,7 +1508,7 @@ void LocLiteNode::MaybeDispatchKissReloc(const CloudPtr& scan, const SE3& curren
     if (reloc_inflight_) {
         return;
     }
-    const double cooldown = reloc_->ScCooldownSec();
+    const double cooldown = reloc_->RelocCooldownSec();
     // cooldown: scan ts 域 (与 last_sc_attempt_ts_ 同域); 手动跳过
     if (!manual && last_sc_attempt_ts_ >= 0.0 && ts - last_sc_attempt_ts_ < cooldown) {
         return;

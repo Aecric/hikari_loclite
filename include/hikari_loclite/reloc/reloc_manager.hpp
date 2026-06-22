@@ -42,8 +42,8 @@ struct ScDebugInfo {
     bool gravity_passed = false;
 };
 
-/// 轻量重定位管理器: bounded SC query for init / LOST recovery.
-/// Good 态 disarm, 不运行后台线程.
+/// 轻量重定位管理器: bounded KISS/SC query for init / LOST recovery.
+/// Good 态 disarm, 不运行常驻后台线程.
 class RelocManager {
    public:
     using Ptr = std::shared_ptr<RelocManager>;
@@ -68,7 +68,9 @@ class RelocManager {
     bool RelocReady() const {
         return backend_ == RelocBackend::Kiss ? kiss_.TargetReady() : sc_enabled_;
     }
-    double ScCooldownSec() const { return sc_cooldown_sec_; }
+    double RelocCooldownSec() const { return reloc_cooldown_sec_; }
+    /// 兼容旧调用点命名 (语义同 RelocCooldownSec).
+    double ScCooldownSec() const { return RelocCooldownSec(); }
     double MaxRuntimeSec() const { return max_runtime_sec_; }
     /// armed 已持续多久 (wall 秒); 未 armed 或无 arm_ts 返回 -1. 供异步 KISS 路径 (绕过 TryRelocalize
     /// 内置的 max_runtime 检查) 自行判定是否超 MaxRuntimeSec 而 Disarm.
@@ -117,15 +119,17 @@ class RelocManager {
                                        const SE3& current_imu_pose, NdtCorrector* ndt, bool manual) const;
 
     /// armed 期间逐帧调用: 体素降采样后的 deskewed scan (lidar 系) + 对应 LIO lidar 位姿入环形缓冲.
-    /// 每帧开销仅为降采样 + 入队; 合并/重力对齐/查询只在 SC 尝试节奏 (cooldown) 内发生.
+    /// 每帧开销仅为降采样 + 入队; 合并/重力对齐/查询只在重定位尝试节奏 (cooldown) 内发生.
     void AccumulateScan(const CloudPtr& scan, const SE3& lidar_pose);
 
     /// 清空滚动累积缓冲. Arm/Disarm 内部已调用; LIO ResetToMapPose 后相对位姿断裂时也需调用.
     void ClearAccumulation();
     int AccumulatedFrames() const { return static_cast<int>(accum_buffer_.size()); }
-    int ScAccumFrames() const { return sc_accum_frames_; }
+    int QueryAccumFrames() const { return query_accum_frames_; }
+    /// 兼容旧调用点命名 (语义同 QueryAccumFrames).
+    int ScAccumFrames() const { return QueryAccumFrames(); }
 
-    /// 最近一次 SC 查询实际使用的点云 (level 系, 合并 + 重力对齐后), 供 debug 发布; 可能为空.
+    /// 最近一次 KISS/SC 查询实际使用的点云 (level 系, 合并 + 重力对齐后), 供 debug 发布; 可能为空.
     CloudPtr LastQueryCloud() const { return last_query_cloud_; }
 
     /// Get debug info from the last query (for publishing SC debug topics).
@@ -169,7 +173,7 @@ class RelocManager {
     bool disable_after_good_ = true;
     bool sc_enabled_ = true;
     int sc_top_k_ = 1;
-    double sc_cooldown_sec_ = 5.0;
+    double reloc_cooldown_sec_ = 5.0;
     double max_runtime_sec_ = 10.0;
 
     // Gravity check thresholds (SC backend only)
@@ -185,14 +189,14 @@ class RelocManager {
     double yaw_refine_range_deg_ = 9.0;
     double yaw_refine_step_deg_ = 3.0;
 
-    // SC 查询点云滚动累积 (armed 期间逐帧维护; 调用方与节点主链路同锁, 无需额外加锁)
+    // KISS/SC 查询点云滚动累积 (armed 期间逐帧维护; 调用方与节点主链路同锁, 无需额外加锁)
     std::deque<AccumFrame> accum_buffer_;
-    int sc_accum_frames_ = 20;          // 查询前所需累积帧数; <=1 时退化为单帧查询
-    double sc_accum_voxel_leaf_ = 0.1;  // 入队前 + 合并后体素降采样 leaf (m); <=0 关闭降采样
+    int query_accum_frames_ = 20;          // 查询前所需累积帧数; <=1 时退化为单帧查询
+    double query_accum_voxel_leaf_ = 0.1;  // 入队前 + 合并后体素降采样 leaf (m); <=0 关闭降采样
     // 发散守门: 与上一入队帧相对平移超此值不入队 (LIO 发散时相对位姿拼接会糊掉查询云); <=0 关闭
-    double sc_accum_max_rel_trans_m_ = 1.0;
+    double query_accum_max_rel_trans_m_ = 1.0;
     int accum_reject_count_ = 0;        // 连续被发散守门拒绝的帧数 (节流日志 + 入队成功时清零)
-    CloudPtr last_query_cloud_;         // 最近一次实际送入 QueryTopK 的点云 (level 系)
+    CloudPtr last_query_cloud_;         // 最近一次实际送入 backend 查询的点云 (level 系)
 
     ScDebugInfo debug_;
 };
