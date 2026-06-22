@@ -72,6 +72,9 @@ class RelocManager {
     /// 兼容旧调用点命名 (语义同 RelocCooldownSec).
     double ScCooldownSec() const { return RelocCooldownSec(); }
     double MaxRuntimeSec() const { return max_runtime_sec_; }
+    /// max_runtime_sec <= 0 (惯例填 -1) 表示不限时: armed 后永不因超时 disarm, 一直重试直到成功 /
+    /// 收到有效 /initialpose / 手动停。两处 max_runtime 守门 (TryRelocalize 与异步 KISS 派发) 共用此判定。
+    bool RuntimeUnlimited() const { return max_runtime_sec_ <= 0.0; }
     /// armed 已持续多久 (wall 秒); 未 armed 或无 arm_ts 返回 -1. 供异步 KISS 路径 (绕过 TryRelocalize
     /// 内置的 max_runtime 检查) 自行判定是否超 MaxRuntimeSec 而 Disarm.
     double ArmedElapsed(double current_time) const {

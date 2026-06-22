@@ -310,14 +310,9 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
     RCLCPP_INFO(this->get_logger(), "GravityAlignmentFilter: cutoff_freq=%.2f Hz, lidar_frame=%s, level_frame=%s",
                 level_cutoff, lidar_frame_id_.c_str(), level_frame_id_.c_str());
 
-    // 初始状态: 等待外部 /initialpose 或自动重定位 (KISS/SC, 按 backend)
-    state_machine_.SetWaitForInitialPose("startup");
-    // auto-on-init: arm reloc so first ProcessFrame can attempt relocalization
-    if (reloc_->AutoOnInit() && reloc_->RelocReady()) {
-        reloc_->Arm("auto_on_init", this->now().seconds());
-        RCLCPP_INFO(this->get_logger(), "reloc auto_on_init: armed for first scan (backend=%s)",
-                    reloc_->BackendIsKiss() ? "kiss" : "sc");
-    }
+    // 初始状态: 等待外部 /initialpose 或自动重定位 (KISS/SC, 按 backend).
+    // EnterWaitForInitialPose 内按 auto_on_init arm reloc, 使首帧 ProcessFrame 即可尝试重定位。
+    EnterWaitForInitialPose("startup");
 
     // Subscribers
     imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
@@ -532,6 +527,21 @@ void LocLiteNode::OnCloud(sensor_msgs::msg::PointCloud2::SharedPtr msg) {
         lio_->AddCloud(msg);
     }
     ProcessFrame();
+}
+
+void LocLiteNode::EnterWaitForInitialPose(const char* reason) {
+    // 不变量: 进入 WAIT 即按 auto_on_init 决定 reloc 的 armed 状态, 不依赖进入来源
+    // (冷启动 / LOST 超时 / initialpose 被拒 一致). max_runtime_sec<=0 时 WAIT 自动 reloc 不限时。
+    state_machine_.SetWaitForInitialPose(reason);
+    if (reloc_->AutoOnInit() && reloc_->RelocReady()) {
+        reloc_->Arm(reason, this->now().seconds());
+        RCLCPP_INFO(this->get_logger(),
+                    "WaitForInitialPose (reason=%s): auto_on_init armed reloc (backend=%s)",
+                    reason, reloc_->BackendIsKiss() ? "kiss" : "sc");
+    } else {
+        // auto_on_init=false: 不自动 reloc, 纯等 /initialpose; 清掉 LOST 可能遗留的 armed 状态
+        reloc_->Disarm(reason);
+    }
 }
 
 void LocLiteNode::OnInitialPose(geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) {
@@ -766,8 +776,9 @@ void LocLiteNode::ProcessFrame() {
         if (ts - lost_enter_ts_ > lost_timeout_sec_) {
             RCLCPP_WARN(this->get_logger(), "lost for %.1f s (> %.1f s), switch to WAIT_FOR_INITIALPOSE",
                         ts - lost_enter_ts_, lost_timeout_sec_);
-            state_machine_.SetWaitForInitialPose("lost_timeout");
-            reloc_->Disarm("lost_timeout");
+            // 转 WAIT 后由 EnterWaitForInitialPose 按 auto_on_init 重新 arm 自动 reloc
+            // (不再永久 disarm 干等 /initialpose); LOST 自身的局部恢复逻辑与此解耦。
+            EnterWaitForInitialPose("lost_timeout");
             lost_enter_ts_ = -1.0;
             pose_frozen_ = false;
             has_last_good_ = false;
@@ -843,7 +854,7 @@ void LocLiteNode::HandlePendingInitPose(const CloudPtr& scan, double ts) {
                 has_pending_init_pose_ = false;
                 init_retry_count_ = 0;
                 ResetInitAccumulation();
-                state_machine_.SetWaitForInitialPose("init_accum_timeout");
+                EnterWaitForInitialPose("init_accum_timeout");
             }
             return;
         }
@@ -896,7 +907,7 @@ void LocLiteNode::HandlePendingInitPose(const CloudPtr& scan, double ts) {
         has_pending_init_pose_ = false;
         init_retry_count_ = 0;
         ResetInitAccumulation();
-        state_machine_.SetWaitForInitialPose("init_retry_exhausted");
+        EnterWaitForInitialPose("init_retry_exhausted");
     } else if (init_accum_enabled_) {
         const double total_wait = init_accum_first_ts_ >= 0.0 ? ts - init_accum_first_ts_ : 0.0;
         if (total_wait >= init_accum_max_wait_sec_) {
@@ -906,7 +917,7 @@ void LocLiteNode::HandlePendingInitPose(const CloudPtr& scan, double ts) {
             has_pending_init_pose_ = false;
             init_retry_count_ = 0;
             ResetInitAccumulation();
-            state_machine_.SetWaitForInitialPose("init_accum_rejected");
+            EnterWaitForInitialPose("init_accum_rejected");
             return;
         }
         RCLCPP_WARN(this->get_logger(),
@@ -1521,8 +1532,9 @@ void LocLiteNode::MaybeDispatchKissReloc(const CloudPtr& scan, const SE3& curren
                              wall_now, blackout_deadline_sec_);
         return;
     }
-    // max_runtime: armed 过久则 disarm (异步路径绕过 TryRelocalize 内置检查, 此处自行判定); 墙钟域
-    if (!manual && reloc_->MaxRuntimeSec() > 0.0 &&
+    // max_runtime: armed 过久则 disarm (异步路径绕过 TryRelocalize 内置检查, 此处自行判定); 墙钟域。
+    // RuntimeUnlimited() (max_runtime_sec <= 0) 表示不限时, 跳过超时 disarm, WAIT 态自动 reloc 持续重试。
+    if (!manual && !reloc_->RuntimeUnlimited() &&
         reloc_->ArmedElapsed(wall_now) > reloc_->MaxRuntimeSec()) {
         RCLCPP_WARN(this->get_logger(), "[KISS-Reloc] max runtime exceeded (%.1f s), disarming",
                     reloc_->MaxRuntimeSec());

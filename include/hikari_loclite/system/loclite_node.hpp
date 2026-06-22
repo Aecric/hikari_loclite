@@ -69,6 +69,11 @@ class LocLiteNode : public rclcpp::Node {
 
     /// 一帧 lidar 完整处理: LIO → /initialpose sticky retry → 状态机驱动 → 发布 (持锁)
     void ProcessFrame();
+    /// 统一所有进入 WaitForInitialPose 的转移: SetWaitForInitialPose(reason) +
+    /// 不变量 "WAIT && auto_on_init && RelocReady ⟹ reloc armed" —— 冷启动 / LOST 超时 /
+    /// initialpose 被 NDT 拒绝 一律 re-arm 自动重定位 (auto_on_init=false 时保持 disarmed, 纯等 /initialpose)。
+    /// 配 reloc.max_runtime_sec<=0 时 WAIT 态自动 reloc 不限时。LOST 逻辑独立, 不经此入口。
+    void EnterWaitForInitialPose(const char* reason);
     /// /initialpose pending pose 的累积点云 NDT 验证 (持锁, ProcessFrame 内调用)
     void HandlePendingInitPose(const CloudPtr& scan, double ts);
     bool UpdatePendingInitPoseWithGravity();

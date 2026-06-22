@@ -189,6 +189,10 @@ void RelocManager::Arm(const char* reason, double current_time) {
     armed_.store(true, std::memory_order_release);
     reason_ = reason ? reason : "";
     arm_ts_ = current_time;
+    if (RuntimeUnlimited()) {
+        LOG(INFO) << "[RelocManager] armed (reason=" << reason_ << "), max_runtime_sec="
+                  << max_runtime_sec_ << " <= 0: unlimited runtime, no timeout disarm";
+    }
     // 重新 arm 即重新累积: 旧缓冲的 LIO 位姿域可能已断裂 (历经 Good 校正 / 重置)
     ClearAccumulation();
 }
@@ -334,8 +338,9 @@ RelocCandidate RelocManager::TryRelocalize(const CloudPtr& scan, const SE3& curr
     if (!RelocReady()) return {};
     if (!scan || scan->empty()) return {};
 
-    // Check max runtime: disarm if relocalization has been trying too long
-    if (max_runtime_sec_ > 0.0 && arm_ts_ > 0.0 && current_time > 0.0 &&
+    // Check max runtime: disarm if relocalization has been trying too long.
+    // RuntimeUnlimited() (max_runtime_sec <= 0) 跳过超时判定, 永不因超时 disarm。
+    if (!RuntimeUnlimited() && arm_ts_ > 0.0 && current_time > 0.0 &&
         current_time - arm_ts_ > max_runtime_sec_) {
         LOG(WARNING) << "[RelocManager] max runtime exceeded (" << max_runtime_sec_ << " s), disarming";
         Disarm("max_runtime_exceeded");

@@ -69,11 +69,11 @@ reloc:
   yaw_refine_step_deg: 3.0             # yaw 微扫步长 deg; 逐起点跑 NDT.Validate 取最佳 TP
 
   # ==== 重定位自动触发/调度 (KISS / SC 共用) ====
-  auto_on_init: true                    # 冷启动时自动尝试当前 backend (不依赖 /initialpose)
-  auto_on_lost: false                   # LOST 态是否自动 arm 当前 backend 恢复
+  auto_on_init: true                    # WaitForInitialPose 态(冷启动/LOST超时/initialpose被拒一致)是否持续自动重定位; 不依赖 /initialpose
+  auto_on_lost: false                   # LOST 态是否自动 arm 当前 backend 恢复 (与 auto_on_init 解耦, 仅作用于 LOST 短窗口)
   disable_after_good: true              # Good 态 disarm reloc, 不消耗 CPU
   reloc_cooldown_sec: 3.0               # 两次真实重定位查询之间的冷却时间 (秒); 代码兼容旧键 sc_cooldown_sec
-  max_runtime_sec: 20.0                 # 自动重定位 armed 后最大总运行窗口 (秒); 手动触发不受此限制
+  max_runtime_sec: 20.0                 # 自动重定位 armed 后最大总运行窗口 (秒); 设 -1 (或 <=0) = 不限时, 一直重试直到 Good/有效 initialpose; >0 为有限上限, 跑满即 disarm 停下(等再次进入 WAIT 或 /initialpose); 手动触发不受此限制
 
   # ==== 重定位查询点云滚动累积 (KISS / SC 共用) ====
   # armed (init/LOST) 期间逐帧体素降采样入环形缓冲; 查询时按相对 LIO 位姿统一到最新帧 body 系,

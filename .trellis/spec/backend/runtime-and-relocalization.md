@@ -189,6 +189,48 @@ gate window TF/odom keep publishing but `loc_state` stays `Initializing`. Set
 immediately Good" behavior. Reset the gate on every `ResetToMapPose()` path
 (`/initialpose`, manual SC) so a stale window cannot release a fresh pose.
 
+### WaitForInitialPose <-> reloc-armed invariant
+
+`WaitForInitialPose` is the persistent auto-relocalization state, **not** a
+"sit and wait for a human" state. Every transition into it MUST go through the
+single helper `LocLiteNode::EnterWaitForInitialPose(reason)`, which enforces the
+invariant:
+
+> in `WaitForInitialPose`, `reloc.auto_on_init && RelocReady()` ⟹ reloc armed;
+> otherwise disarmed.
+
+This holds regardless of how the state was entered — cold start, `lost_timeout`
+(from `Lost`), or an `/initialpose` rejected by NDT (`init_accum_timeout`,
+`init_retry_exhausted`, `init_accum_rejected`). The earlier code disarmed reloc
+on the `lost_timeout` path and left the rejection paths disarmed, so after a
+loss or a bad `/initialpose` the node sat idle waiting for a human — the helper
+removes that asymmetry. Do not call `state_machine_.SetWaitForInitialPose()`
+directly; route through the helper so the invariant cannot drift.
+
+`/initialpose` still interrupts: `OnInitialPose` disarms reloc, bumps
+`reloc_gen_` (invalidates in-flight KISS workers), opens the blackout window,
+and enters `Initializing`. If validation succeeds → `Good`; if it is rejected,
+the rejection path re-enters `WaitForInitialPose` and the helper re-arms auto
+relocalization. `Lost` is independent of this invariant — it runs its own short
+local-recovery window and (optionally, `auto_on_lost`) global reloc, then hands
+off to `WaitForInitialPose` on timeout.
+
+#### `max_runtime_sec <= 0` = unlimited
+
+`reloc.max_runtime_sec <= 0` (convention: `-1`) means **no timeout disarm**:
+armed reloc retries until success / a valid `/initialpose` / manual stop.
+`RelocManager::RuntimeUnlimited()` is the single predicate; both max-runtime
+guards (`RelocManager::TryRelocalize` and the async KISS dispatch in
+`MaybeDispatchKissReloc`) gate on `!RuntimeUnlimited()` rather than a bare
+`> 0.0`, and `Arm()` logs the unlimited mode for auditability. A finite
+`max_runtime_sec > 0` caps a single armed episode: it disarms after the window
+and stays disarmed until the state re-enters `WaitForInitialPose` (or a new
+`/initialpose`). Re-arming is tied to **state entry**, never to the timeout, so
+a finite cap never silently becomes an infinite retry loop. WAIT has no other
+timeout that disarms auto reloc, so `<= 0` yields genuinely unlimited cold-start
+and post-loss relocalization; `max_runtime_sec` does not bound the `Lost`
+window (that is `system.lost_timeout_sec`).
+
 ## Main Processing Rules
 
 - IMU callbacks should enqueue IMU data under mutex.
