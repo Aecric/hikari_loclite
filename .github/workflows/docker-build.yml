@@ -3,7 +3,8 @@ name: Build hikari_loclite DEB
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*'         # v0.1.0 风格
+      - '[0-9]*'     # 裸版本号风格, 如 0.0.0 / 1.2.3 (package.xml 直接吃这种)
   workflow_dispatch:
     inputs:
       build_jobs:
@@ -46,17 +47,21 @@ jobs:
               TAG="$RAW_TAG"
               VERSION="${RAW_TAG#v}"
               VERSION="$(echo "$VERSION" | tr ':_' '..')"
-              [ -z "$VERSION" ] && VERSION="0.0.0~empty"
-              if ! echo "$VERSION" | grep -qE '^[0-9]'; then
-                  echo "::error::Invalid version '$VERSION' derived from tag '$RAW_TAG' - must start with a digit"
-                  exit 1
-              fi
           else
               TIMESTAMP="$(date -u +'%Y%m%d-%H%M%S')"
-              SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
               TAG="build-${TIMESTAMP}"
-              VERSION="0.0.0~dev.${SHORT_SHA}"
+              # package.xml(catkin_pkg) 要求版本恰好 X.Y.Z 三段整数, 不能带 ~dev 后缀;
+              # dev 快照用 0.0.0 占位, 唯一性由 TAG(时间戳) 承载.
+              VERSION="0.0.0"
               SOURCE="dev snapshot"
+          fi
+
+          # 版本必须满足 ROS package.xml 规则: 恰好三段非负整数 (catkin_pkg 正则
+          # ^[0-9]+\.[0-9]+\.[0-9]+$). 这不是 Debian 规则(Debian 更宽松), 而是 bloom-generate
+          # 读 package.xml 时的硬校验. 在此 fail-fast, 免得拉完镜像才在 bloom 阶段报错.
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::Invalid version '$VERSION' from tag '$RAW_TAG': package.xml requires exactly MAJOR.MINOR.PATCH (e.g. 0.0.0), enforced by catkin_pkg — not a Debian rule"
+              exit 1
           fi
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
