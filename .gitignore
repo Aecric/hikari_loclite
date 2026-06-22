@@ -7,4 +7,5 @@ install/
 *.tmp
 __pycache__/
 *.pyc
-*.txt
+# 注意: 不要用裸 *.txt —— 会静默吞掉所有 CMakeLists.txt (KISS vendored 子树即因此漏提交, CI add_subdirectory 失败)
+tmp.txt
