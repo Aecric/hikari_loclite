@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
-- **Last Active**: 2026-06-15
+- **Total Sessions**: 6
+- **Last Active**: 2026-06-22
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~176 | Active |
+| `journal-1.md` | ~209 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 6 | 2026-06-22 | Separate shared reloc config from SC fallback | `ce51e92` | `master` |
 | 5 | 2026-06-15 | Write bilingual project README | `8e9860b` | `master` |
 | 4 | 2026-06-15 | Phase6 产品化 + ZUPT 标定收尾 | `f09a7de`, `d0d69fc`, `4ac7ad9`, `1d930e0` | `master` |
 | 3 | 2026-06-11 | NDT Phase 2 退化检测实现 | `5358cb0`, `4ce6aea` | `master` |

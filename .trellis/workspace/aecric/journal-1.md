@@ -174,3 +174,36 @@ Added a bilingual Chinese/English README covering project overview, build/run co
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: Separate shared reloc config from SC fallback
+
+**Date**: 2026-06-22
+**Task**: Separate shared reloc config from SC fallback
+**Branch**: `master`
+
+### Summary
+
+Separated backend-agnostic relocalization scheduling and query accumulation config from SC-only fallback settings. Added reloc_cooldown_sec and query_accum_* keys with legacy sc_* fallback reads, updated runtime call sites and specs, verified YAML parsing, diff check, and Docker Release build.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ce51e92` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
