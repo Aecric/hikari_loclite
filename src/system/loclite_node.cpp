@@ -34,6 +34,11 @@ geometry_msgs::msg::Pose ToPoseMsg(const SE3& T) {
 
 rclcpp::Time ToRosTime(double ts) { return rclcpp::Time(static_cast<int64_t>(ts * 1e9)); }
 
+double PoseYaw(const SE3& pose) {
+    const Mat3d R = pose.so3().matrix();
+    return std::atan2(R(1, 0), R(0, 0));
+}
+
 void FillOdomMsg(nav_msgs::msg::Odometry& odom_msg, const rclcpp::Time& stamp,
                  const std::string& map_frame_id, const std::string& lidar_frame_id,
                  const SE3& T_map_lidar, const Vec3d& linear_velocity_map) {
@@ -93,6 +98,7 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
     double level_cutoff = 0.5;
     StabilityGate::Options gate_options;
     LitePoseSmoother::Options smoother_options;  // smoother.* 缺省即 Options 默认 (0.5m/15° 输出, 0.5m/8° 校正)
+    ImuConsistencyGate::Options imu_gate_options;
     try {
         auto yaml = YAML::LoadFile(config_path_);
         if (yaml["common"]) {
@@ -185,6 +191,33 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
             sanity_gate_enabled_ = sg["enabled"].as<bool>(true);
             sanity_max_speed_mps_ = sg["max_speed_mps"].as<double>(1.0);
             sanity_max_accel_mps2_ = sg["max_accel_mps2"].as<double>(0.8);
+            imu_gate_options.enabled = sg["imu_consistency_enabled"].as<bool>(false);
+            imu_gate_options.window_sec = sg["imu_consistency_window_sec"].as<double>(imu_gate_options.window_sec);
+            imu_gate_options.min_check_interval_sec =
+                sg["imu_consistency_min_check_interval_sec"].as<double>(imu_gate_options.min_check_interval_sec);
+            imu_gate_options.max_imu_gap_sec =
+                sg["imu_consistency_max_imu_gap_sec"].as<double>(imu_gate_options.max_imu_gap_sec);
+            imu_gate_options.loc_static_speed_mps =
+                sg["imu_consistency_loc_static_speed_mps"].as<double>(imu_gate_options.loc_static_speed_mps);
+            imu_gate_options.loc_static_dist_m =
+                sg["imu_consistency_loc_static_dist_m"].as<double>(imu_gate_options.loc_static_dist_m);
+            imu_gate_options.loc_static_yaw_rad =
+                sg["imu_consistency_loc_static_yaw_rad"].as<double>(imu_gate_options.loc_static_yaw_rad);
+            imu_gate_options.loc_moving_dist_m =
+                sg["imu_consistency_loc_moving_dist_m"].as<double>(imu_gate_options.loc_moving_dist_m);
+            imu_gate_options.loc_moving_yaw_rad =
+                sg["imu_consistency_loc_moving_yaw_rad"].as<double>(imu_gate_options.loc_moving_yaw_rad);
+            imu_gate_options.gyro_dynamic_radps =
+                sg["imu_consistency_gyro_dynamic_radps"].as<double>(imu_gate_options.gyro_dynamic_radps);
+            imu_gate_options.gyro_yaw_delta_rad =
+                sg["imu_consistency_gyro_yaw_delta_rad"].as<double>(imu_gate_options.gyro_yaw_delta_rad);
+            imu_gate_options.acc_dynamic_mps2 =
+                sg["imu_consistency_acc_dynamic_mps2"].as<double>(imu_gate_options.acc_dynamic_mps2);
+            imu_gate_options.acc_window_energy_mps2 =
+                sg["imu_consistency_acc_window_energy_mps2"].as<double>(imu_gate_options.acc_window_energy_mps2);
+            imu_gate_options.fail_windows =
+                sg["imu_consistency_fail_windows"].as<int>(imu_gate_options.fail_windows);
+            imu_gate_options.log_rate_hz = sg["imu_consistency_log_rate_hz"].as<double>(imu_gate_options.log_rate_hz);
         }
         // smoother 跳变门限 (Phase1 可配; 缺省用 Options 默认值, 见 lite_pose_smoother.hpp)
         if (yaml["smoother"]) {
@@ -296,10 +329,18 @@ bool LocLiteNode::Init(const std::string& cli_config, const std::string& cli_map
                 smoother_options.max_output_jump_trans_m, smoother_options.max_output_jump_rot_deg,
                 smoother_options.max_correction_trans_m, smoother_options.max_correction_rot_deg);
 
+    imu_consistency_gate_.SetOptions(imu_gate_options);
+
     RCLCPP_INFO(this->get_logger(),
                 "SanityGate: enabled=%d, max_speed=%.2f m/s, max_accel=%.2f m/s², ndt_local_recovery=%d",
                 sanity_gate_enabled_ ? 1 : 0, sanity_max_speed_mps_, sanity_max_accel_mps2_,
                 ndt_local_recovery_enabled_ ? 1 : 0);
+    const auto& imu_gate_cfg = imu_consistency_gate_.GetOptions();
+    RCLCPP_INFO(this->get_logger(),
+                "IMU consistency gate: enabled=%d, window=%.2fs, fail_windows=%d, "
+                "loc_static_speed=%.3f m/s",
+                imu_gate_cfg.enabled ? 1 : 0, imu_gate_cfg.window_sec, imu_gate_cfg.fail_windows,
+                imu_gate_cfg.loc_static_speed_mps);
 
     // 重力对齐滤波器 (lidar_frame → level_frame 纯旋转 TF)
     GravityAlignmentFilter::Options gf_options;
@@ -502,6 +543,10 @@ void LocLiteNode::Shutdown() {
 void LocLiteNode::OnImu(sensor_msgs::msg::Imu::SharedPtr msg) {
     std::lock_guard<std::mutex> lk(mutex_);
     last_imu_wall_ts_ = this->now().seconds();  // watchdog: IMU 到达时刻 (node clock)
+    const double imu_ts = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
+    imu_consistency_gate_.AddImu(
+        imu_ts, Vec3d(msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z),
+        Vec3d(msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z));
     lio_->AddImu(msg);
     MaybePublishImuExtrapolatedTF(*msg);
 
@@ -629,6 +674,7 @@ void LocLiteNode::ProcessFrame() {
 
     // /initialpose sticky retry: 每个新 scan 到来时验证 pending pose
     if (has_pending_init_pose_) {
+        imu_consistency_gate_.ResetLocalization();
         if (!UpdatePendingInitPoseWithGravity()) {
             RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
                                  "[FC-Init] waiting for LIO/IMU gravity compensation before accumulation");
@@ -696,6 +742,48 @@ void LocLiteNode::ProcessFrame() {
             }
         }
 
+        const double raw_yaw = PoseYaw(state.GetPose());
+        const auto imu_consistency = imu_consistency_gate_.ObserveLocalization(ts, state.pos_, raw_yaw, state.vel_.norm());
+        if (imu_consistency.checked && imu_consistency.valid_window && imu_consistency.fail) {
+            const auto& imu_gate_cfg = imu_consistency_gate_.GetOptions();
+            const int log_period_ms =
+                static_cast<int>(1000.0 / std::max(0.1, imu_gate_cfg.log_rate_hz));
+            RCLCPP_INFO_THROTTLE(
+                this->get_logger(), *this->get_clock(), log_period_ms,
+                "[IMUConsistencyGate] reason=%s fail=%d/%d imu_static=%d imu_dynamic=%d "
+                "loc_static=%d loc_moving=%d gyro_mean=%.3f rad/s gyro_yaw=%.3f rad "
+                "acc_std=%.3f acc_dmean=%.3f loc_dist=%.3f m loc_yaw=%.3f rad loc_vmax=%.3f m/s",
+                imu_consistency.reason.c_str(), imu_consistency.fail_count, imu_gate_cfg.fail_windows,
+                imu_consistency.imu_static ? 1 : 0, imu_consistency.imu_dynamic ? 1 : 0,
+                imu_consistency.loc_static ? 1 : 0, imu_consistency.loc_moving ? 1 : 0,
+                imu_consistency.gyro_mean_radps, imu_consistency.gyro_yaw_delta_rad,
+                imu_consistency.acc_norm_std_mps2, imu_consistency.acc_norm_delta_mean_mps2,
+                imu_consistency.loc_dist_m, imu_consistency.loc_yaw_delta_rad,
+                imu_consistency.loc_max_speed_mps);
+        }
+        if (imu_consistency.triggered) {
+            if (has_last_good_) {
+                frozen_T_map_base_ = last_good_T_map_base_;
+                frozen_T_map_lidar_ = last_good_T_map_lidar_;
+                pose_frozen_ = true;
+            }
+            RCLCPP_WARN(this->get_logger(),
+                        "[IMUConsistencyGate] %s for %d windows, trigger LOST",
+                        imu_consistency.reason.c_str(), imu_consistency.fail_count);
+            state_machine_.SetLost(imu_consistency.reason.c_str());
+            lost_enter_ts_ = ts;
+            if (reloc_->AutoOnLost() && reloc_->RelocReady()) {
+                reloc_->Arm("imu_consistency_gate", this->now().seconds());
+            }
+            if (pose_frozen_) {
+                PublishPose(frozen_T_map_lidar_, ts);
+            } else {
+                PublishPose(state);
+            }
+            PublishStatusTopics(ts);
+            return;
+        }
+
         const SE3 raw_lidar_pose = lio_->ImuPoseToLidarPose(state.GetPose());
         const SE3 smoothed_lidar_pose = smoother_.UpdateFastLioPose(raw_lidar_pose);
         const SE3 smoother_delta = smoothed_lidar_pose.inverse() * raw_lidar_pose;
@@ -746,6 +834,7 @@ void LocLiteNode::ProcessFrame() {
             PublishPose(state);
         }
     } else if (loc_state == LiteLocState::Initializing) {
+        imu_consistency_gate_.ResetLocalization();
         // 稳定门控期 (照 lightning 方案 B): TF/odom 照发, loc_state 保持 Initializing,
         // 滑窗内位姿抖动收敛 (或 NDT TP 提前放行) 后才切 Good.
         // 只有 /initialpose 验证通过后才会走到这里 (验证期间 has_pending_init_pose_ 已提前 return).
@@ -769,6 +858,7 @@ void LocLiteNode::ProcessFrame() {
         }
         PublishPose(state);
     } else if (loc_state == LiteLocState::Lost) {
+        imu_consistency_gate_.ResetLocalization();
         // Lost 持续超过 lost_timeout_sec 才转 WAIT_FOR_INITIALPOSE
         if (lost_enter_ts_ < 0.0) {
             lost_enter_ts_ = ts;
@@ -824,6 +914,7 @@ void LocLiteNode::ProcessFrame() {
             }
         }
     } else if (loc_state == LiteLocState::WaitForInitialPose || loc_state == LiteLocState::Uninitialized) {
+        imu_consistency_gate_.ResetLocalization();
         // reloc auto-on-init: attempt if armed and LIO has output
         if (reloc_->Armed() && reloc_->AutoOnInit() && reloc_->RelocReady()) {
             // backend=kiss 走异步 worker (不阻塞 spin); backend=sc 仍同步 (查询轻量)

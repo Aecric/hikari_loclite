@@ -230,3 +230,25 @@ sanity_gate:
   enabled: true                         # 总开关
   max_speed_mps: 1.0                    # 速度阈值 (m/s), state.vel_.norm() 超过即 LOST
   max_accel_mps2: 0.8                   # 加速度阈值 (m/s²), 差分速度 |v_k - v_{k-1}|/dt 超过即 LOST
+
+  # IMU-only 运动一致性门控 (测试功能, 默认关闭):
+  # 用短窗口 IMU 动态证据 vs LIO/ESKF 输出运动做一致性检查:
+  #   1) IMU 静止/低动态, 但定位持续移动 → LOST
+  #   2) IMU 有明显转动/加速度动态, 但定位几乎不动 → LOST
+  # 注意: 纯 IMU 无法区分"真的静止"和"匀速直线运动"; 无加速度/角速度证据的匀速直线盲区
+  # 需要 cmd_vel/odom 等外部运动意图或里程计补足, 本任务不启用这些输入。
+  imu_consistency_enabled: false
+  imu_consistency_window_sec: 1.0
+  imu_consistency_min_check_interval_sec: 0.2
+  imu_consistency_max_imu_gap_sec: 0.2
+  imu_consistency_fail_windows: 3
+  imu_consistency_log_rate_hz: 1.0
+  imu_consistency_loc_static_speed_mps: 0.03
+  imu_consistency_loc_static_dist_m: 0.03
+  imu_consistency_loc_static_yaw_rad: 0.03
+  imu_consistency_loc_moving_dist_m: 0.15
+  imu_consistency_loc_moving_yaw_rad: 0.10
+  imu_consistency_gyro_dynamic_radps: 0.08
+  imu_consistency_gyro_yaw_delta_rad: 0.08
+  imu_consistency_acc_dynamic_mps2: 0.20
+  imu_consistency_acc_window_energy_mps2: 0.50

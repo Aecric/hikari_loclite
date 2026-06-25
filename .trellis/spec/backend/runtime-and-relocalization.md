@@ -375,6 +375,92 @@ section (each key falls back to the struct default if absent):
 > into Degraded/Lost and hand off to SC relocalization, not be chased by a bigger
 > GOOD-state nudge.
 
+## Scenario: IMU-only Localization Motion Consistency Gate
+
+### 1. Scope / Trigger
+
+- Trigger: add or tune a LOST gate that compares short-window IMU dynamics with
+  lidar-rate localization output, without wheel odom or `cmd_vel`.
+- Owner: `LocLiteNode` owns the ROS callback wiring and LOST transition; the
+  window math may live in `system/imu_consistency_gate.hpp`.
+
+### 2. Signatures
+
+- YAML keys under `sanity_gate`:
+  - `imu_consistency_enabled: bool` (default false)
+  - `imu_consistency_window_sec: double`
+  - `imu_consistency_min_check_interval_sec: double`
+  - `imu_consistency_max_imu_gap_sec: double`
+  - `imu_consistency_fail_windows: int`
+  - `imu_consistency_log_rate_hz: double`
+  - `imu_consistency_loc_static_speed_mps`, `*_dist_m`, `*_yaw_rad`
+  - `imu_consistency_loc_moving_dist_m`, `*_yaw_rad`
+  - `imu_consistency_gyro_dynamic_radps`, `imu_consistency_gyro_yaw_delta_rad`
+  - `imu_consistency_acc_dynamic_mps2`, `imu_consistency_acc_window_energy_mps2`
+- Input samples:
+  - IMU callback: sensor timestamp, angular velocity, linear acceleration.
+  - Good/Degraded frame path: scan timestamp, localization position/yaw, ESKF
+    velocity norm.
+
+### 3. Contracts
+
+- Default must stay disabled for safe rollout; enabling is an explicit field-test
+  choice.
+- Evaluate only in `Good` / `Degraded`, after the existing speed/accel sanity
+  gate and before smoother publication. Reset the localization window in
+  Initializing/LOST/WAIT/Uninitialized and pending-initialpose paths.
+- On trigger, reuse the same LOST freeze/recovery behavior as the existing
+  physical sanity gate: freeze at the last trusted pose, set LOST reason, arm
+  reloc when configured, publish frozen pose/status immediately.
+- IMU timestamp rollback or a gap larger than the configured max gap resets the
+  IMU window; it must not trigger LOST by itself.
+- The gate is a consistency check, not a full IMU preintegration estimator.
+  Do not integrate raw acceleration into position in the ROS callback.
+
+### 4. Validation & Error Matrix
+
+- Gate disabled -> no samples affect state and behavior matches the baseline.
+- Insufficient IMU or localization window duration -> no failure, fail counter
+  resets.
+- IMU static/low-dynamic and localization moving -> increment fail counter with
+  reason `imu_consistency_static_loc_moving`.
+- IMU dynamic/rotating and localization stationary -> increment fail counter
+  with reason `imu_consistency_imu_moving_loc_static`.
+- Consecutive fail windows >= configured threshold -> LOST.
+
+### 5. Good/Base/Bad Cases
+
+- Good: robot is static, IMU window is quiet, LIO output drifts over the window
+  -> LOST after consecutive bad windows.
+- Good: robot rotates, gyro yaw evidence accumulates, localization yaw stays
+  nearly fixed -> LOST after consecutive bad windows.
+- Base: disabled config -> existing speed/accel sanity gate remains the only
+  physical hard gate.
+- Bad: treating constant-velocity straight motion as observable from IMU alone.
+  Without acceleration/rotation evidence, IMU cannot distinguish it from static.
+
+### 6. Tests Required
+
+- Static check: `git diff --check`.
+- Build: run the Docker/Jazzy Release build from `quality-guidelines.md`.
+- Runtime smoke when a bag/robot is available: enable the gate, confirm
+  diagnostic logs show window metrics, then verify a forced inconsistency enters
+  LOST with an `imu_consistency_*` reason and frozen odom/TF.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+Double-integrating raw IMU acceleration in `OnImu()` and comparing that position
+to localization output; humanoid vibration and bias make this too noisy for a
+hard LOST decision.
+
+#### Correct
+
+Use bounded short-window evidence (gyro/yaw-rate and acceleration-norm dynamics)
+as a consistency signal, require consecutive bad windows, and route any trigger
+through the existing LOST freeze/recovery path.
+
 ## Scenario: IMU-Extrapolated TF Publishing
 
 ### 1. Scope / Trigger

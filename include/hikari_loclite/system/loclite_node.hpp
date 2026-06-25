@@ -29,6 +29,7 @@
 #include "lio/gravity_alignment.h"
 #include "ndt/ndt_corrector.hpp"
 #include "reloc/reloc_manager.hpp"
+#include "system/imu_consistency_gate.hpp"
 #include "system/lite_pose_smoother.hpp"
 #include "system/loclite_state_machine.hpp"
 #include "system/realtime_setup.hpp"
@@ -196,6 +197,7 @@ class LocLiteNode : public rclcpp::Node {
     double sanity_max_accel_mps2_ = 0.8;  // 加速度阈值 (m/s²), 超过即判定 LOST
     Vec3d last_vel_ = Vec3d::Zero();      // 上一帧 ESKF 速度 (世界系), 用于差分加速度
     double last_vel_ts_ = -1.0;           // 上一帧速度对应的 scan 时间戳 (传感器时间域)
+    ImuConsistencyGate imu_consistency_gate_;  // IMU-only 短窗运动一致性门控 (默认关闭)
 
     // --- TF 冻结 + 最后可信位姿 ---
     bool pose_frozen_ = false;            // LOST 期间冻结 TF
