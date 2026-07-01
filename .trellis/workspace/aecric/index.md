@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 6
-- **Last Active**: 2026-06-22
+- **Total Sessions**: 7
+- **Last Active**: 2026-07-01
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~209 | Active |
+| `journal-1.md` | ~242 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 7 | 2026-07-01 | hikari_loclite: yaw + LIO-vs-NDT divergence diagnostic logging | `4b9011d` | `master` |
 | 6 | 2026-06-22 | Separate shared reloc config from SC fallback | `ce51e92` | `master` |
 | 5 | 2026-06-15 | Write bilingual project README | `8e9860b` | `master` |
 | 4 | 2026-06-15 | Phase6 产品化 + ZUPT 标定收尾 | `f09a7de`, `d0d69fc`, `4ac7ad9`, `1d930e0` | `master` |

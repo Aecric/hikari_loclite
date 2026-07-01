@@ -207,3 +207,36 @@ Separated backend-agnostic relocalization scheduling and query accumulation conf
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: hikari_loclite: yaw + LIO-vs-NDT divergence diagnostic logging
+
+**Date**: 2026-07-01
+**Task**: hikari_loclite: yaw + LIO-vs-NDT divergence diagnostic logging
+**Branch**: `master`
+
+### Summary
+
+分析 indoor2 现场 log 发现 3 次 output-jump-rejected→lost→ndt_local_recovery 假恢复(拉回 GOOD 却是错位姿);用户确认落点错但稳态指标全绿。加纯 observability 日志暴露该盲区:math::YawDeg 助手;reset-to-pose/diag/LostRecover/NDT-LocalRecovery 补 yaw;[NDT-Div] 每 NDT-Good 周期无条件打 LIO<->NDT 原始散度(门控前,去节流,含 lio_yaw/ndt_yaw);jump-rejected 逐帧打 smoother_delta 幅度;[LOST-Freeze] 冻结期逐帧 raw-LIO vs frozen。无行为变更,jazzy 容器 Release 编译通过,trellis-check 0 issues。锚定逻辑(recovery 以冻结位姿±1m 局搜)未改,另开任务。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4b9011d` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "核心契约: 状态机 WAIT/LOST 转移、reloc arm/disarm、cooldown/blackout、时钟域。本任务新增 WaitForInitialPose⟺reloc-armed 不变量 + max_runtime_sec<=0 契约要写进此 spec, 实现须与之一致。"}
+{"file": ".trellis/spec/backend/localization-architecture.md", "reason": "RelocManager / LocLiteStateMachine / LocLiteNode 组件边界与职责; 新增 EnterWaitForInitialPose helper、RuntimeUnlimited() 须符合既有组件契约。"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "新增 arm 时 unlimited INFO 日志 + helper 转移日志, 需遵守 RCLCPP_INFO/WARN 日志风格与字段约定。"}

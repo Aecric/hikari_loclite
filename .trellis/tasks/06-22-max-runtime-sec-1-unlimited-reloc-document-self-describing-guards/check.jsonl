@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/runtime-and-relocalization.md", "reason": "验收: 5 处 WAIT 转移是否统一收敛到不变量、LOST→WAIT 不再永久 disarm、/initialpose 打断 + 拒绝后恢复、max_runtime_sec<=0 不限时/有限值不循环, 均须与 spec 一致。"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "通用质量门: 命名、注释密度、嵌入式 CPU 预算、行为不回归 (auto_on_init=false 时 WAIT 不自动 reloc)。"}
+{"file": ".trellis/spec/guides/code-reuse-thinking-guide.md", "reason": "检查 EnterWaitForInitialPose helper 是否真正消除 5 处重复转移、RuntimeUnlimited() 是否替换全部裸 >0.0 守门, 避免遗漏分叉。"}
