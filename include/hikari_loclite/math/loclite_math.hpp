@@ -93,6 +93,13 @@ inline Eigen::Matrix<double, 3, 3> A_matrix(const Vec3d& v) {
     return res;
 }
 
+// 提取位姿的平面航向角 (deg)。约定与 reloc_manager 一致: yaw = atan2(R(1,0), R(0,0))。
+// 仅用于诊断日志。
+inline double YawDeg(const SE3& pose) {
+    const Mat3d R = pose.so3().matrix();
+    return std::atan2(R(1, 0), R(0, 0)) * 180.0 / M_PI;
+}
+
 // ==================== Hash / comparison ====================
 
 template <int N>

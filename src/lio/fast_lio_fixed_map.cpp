@@ -229,7 +229,8 @@ SE3 FastLioFixedMap::LidarPoseToImuPose(const SE3& T_map_lidar) const {
 }
 
 bool FastLioFixedMap::ResetToMapPose(const SE3& T_map_lidar, bool reset_velocity) {
-    LOG(INFO) << "FastLioFixedMap: reset to pose [" << T_map_lidar.translation().transpose() << "]";
+    LOG(INFO) << "FastLioFixedMap: reset to pose [" << T_map_lidar.translation().transpose()
+              << "], yaw=" << math::YawDeg(T_map_lidar) << " deg";
 
     // Reset only the map pose. Keep IMU-estimated bias/gravity/time state so
     // propagation after relocalization does not restart with a wrong inertial model.
@@ -430,7 +431,7 @@ bool FastLioFixedMap::RunOnce(NavState* state) {
                           << ", final_res_ratio=" << kf_.GetFinalRes()
                           << ", quality_good=" << TrackingQualityGood()
                           << ", pose=[" << ImuPoseToLidarPose(kf_.GetX().GetPose()).translation().transpose()
-                          << "]";
+                          << "], yaw=" << math::YawDeg(ImuPoseToLidarPose(kf_.GetX().GetPose())) << " deg";
 
     // ==== ZUPT 零速更新 ====
     // 走廊沿轴几何不可观, NDT 在该方向同样退化拉不回; ZUPT 用零速运动模型钳死蠕动, 与几何观测正交.

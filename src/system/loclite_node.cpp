@@ -823,8 +823,13 @@ void LocLiteNode::ProcessFrame() {
         if (state_machine_.State() == LiteLocState::Good && !output_jump_rejected) {
             MaybeNdtCorrectGood(scan, state, ts);
         } else if (output_jump_rejected) {
-            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                                 "Fast-LIO output jump rejected by smoother, mark tracking bad");
+            // 逐帧打出被拒跳变的幅度 (仅拒帧时触发, 有界), 用于区分 LIO 真发散 vs 单帧毛刺
+            RCLCPP_WARN(this->get_logger(),
+                        "Fast-LIO output jump rejected by smoother, mark tracking bad: "
+                        "jump=%.3f m/%.2f deg, raw_lio_yaw=%.2f, held_yaw=%.2f deg",
+                        smoother_delta.translation().norm(),
+                        smoother_delta.so3().log().norm() * 180.0 / M_PI,
+                        math::YawDeg(raw_lidar_pose), math::YawDeg(smoothed_lidar_pose));
         }
 
         // ObserveTrackingQuality 可能已触发 LOST → 发布冻结位姿而非发散 LIO 位姿
@@ -876,6 +881,17 @@ void LocLiteNode::ProcessFrame() {
             return;
         }
 
+        // 冻结期逐帧: raw LIO 位姿 vs 冻结位姿散度 (LOST 窗口有界 ≤lost_timeout), 判断 LIO 是否真发散
+        if (pose_frozen_ && lio_has_output_) {
+            const SE3 raw_lio_lidar = lio_->ImuPoseToLidarPose(lio_->LatestState().GetPose());
+            const SE3 freeze_div = frozen_T_map_lidar_.inverse() * raw_lio_lidar;
+            RCLCPP_INFO(this->get_logger(),
+                        "[LOST-Freeze] raw_lio vs frozen: d=%.3f m/%.2f deg, "
+                        "raw_lio_yaw=%.2f, frozen_yaw=%.2f deg",
+                        freeze_div.translation().norm(), freeze_div.so3().log().norm() * 180.0 / M_PI,
+                        math::YawDeg(raw_lio_lidar), math::YawDeg(frozen_T_map_lidar_));
+        }
+
         // S3: NDT 局部恢复 — 用冻结位姿做先验, 局部搜索 (通过即快速恢复, 不走全局重定位)
         // 节流: LOST 态 ~3Hz (嵌入式 CPU 预算), 避免每帧 (~10Hz) 都跑 Validate
         if (pose_frozen_ && ndt_local_recovery_enabled_ && lio_has_output_ &&
@@ -885,8 +901,11 @@ void LocLiteNode::ProcessFrame() {
             const NdtResult ndt_res = ndt_->Validate(frozen_T_map_lidar_, scan);
             if (ndt_res.valid) {
                 RCLCPP_INFO(this->get_logger(),
-                            "[NDT-LocalRecovery] success: TP=%.3f, dt=%.3f m, dr=%.2f deg",
-                            ndt_res.confidence, ndt_res.delta_trans_m, ndt_res.delta_rot_deg);
+                            "[NDT-LocalRecovery] success: TP=%.3f, dt=%.3f m, dr=%.2f deg, "
+                            "frozen_yaw=%.2f, recovered_yaw=%.2f deg (dyaw=%.2f)",
+                            ndt_res.confidence, ndt_res.delta_trans_m, ndt_res.delta_rot_deg,
+                            math::YawDeg(frozen_T_map_lidar_), math::YawDeg(ndt_res.pose),
+                            math::YawDeg(frozen_T_map_lidar_.inverse() * ndt_res.pose));
                 RecoverFromLost(ndt_res.pose, ts, ndt_res.confidence, "ndt_local_recovery");
                 // 用恢复后的位姿发布, 避免发散 LIO state 的一帧毛刺
                 PublishPose(ndt_res.pose, ts);
@@ -1130,9 +1149,23 @@ void LocLiteNode::MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, dou
     const SE3 fast_pose = lio_->ImuPoseToLidarPose(state.GetPose());
     const NdtResult res = ndt_->Align(scan, fast_pose);
     if (!res.valid) {
+        // 每周期无条件记录 (含未收敛), 便于对齐时间线
+        RCLCPP_INFO(this->get_logger(),
+                    "[NDT-Div] ndt not converged (lio_yaw=%.2f deg), skip this cycle",
+                    math::YawDeg(fast_pose));
         return;  // 未收敛 / scan 过稀: 本周期跳过, 不打扰 LIO
     }
     last_ndt_confidence_ = res.confidence;
+
+    // 每周期无条件记录 LIO<->NDT 原始散度 (增益混合/cap/门控之前), 暴露"NDT 自信定错":
+    // 自信定错时 TP/inlier 满分但 raw 散度 (尤其 yaw) 会偏大
+    const SE3 ndt_raw_div = fast_pose.inverse() * res.pose;
+    RCLCPP_INFO(this->get_logger(),
+                "[NDT-Div] LIO<->NDT raw: d=%.3f m/%.2f deg, lio_yaw=%.2f, ndt_yaw=%.2f deg, "
+                "TP=%.3f, inlier=%.3f, degenerate=%d",
+                ndt_raw_div.translation().norm(), ndt_raw_div.so3().log().norm() * 180.0 / M_PI,
+                math::YawDeg(fast_pose), math::YawDeg(res.pose),
+                res.confidence, res.inlier_ratio, res.degenerate ? 1 : 0);
 
     // Phase2: 退化检测 — 退化场景下 NDT 可能收敛到错误解 (长走廊/平面/开阔地), 跳过本次校正
     if (res.degenerate) {
@@ -1170,9 +1203,10 @@ void LocLiteNode::MaybeNdtCorrectGood(const CloudPtr& scan, NavState& state, dou
     smoother_.Reset();
     state.SetPose(lio_->LidarPoseToImuPose(corrected));
     RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
-                         "[NDT-Good] drift corrected: dt=%.3f m, dr=%.2f deg, confidence=%.3f, inlier=%.3f",
+                         "[NDT-Good] drift corrected: dt=%.3f m, dr=%.2f deg, corrected_yaw=%.2f deg, "
+                         "confidence=%.3f, inlier=%.3f",
                          delta.translation().norm(), delta.so3().log().norm() * 180.0 / M_PI,
-                         res.confidence, res.inlier_ratio);
+                         math::YawDeg(corrected), res.confidence, res.inlier_ratio);
 }
 
 void LocLiteNode::PublishMapToBaseTF(const SE3& T_map_lidar, const rclcpp::Time& stamp) {
@@ -1358,18 +1392,18 @@ void LocLiteNode::RecoverFromLost(const SE3& ndt_pose, double ts, double ndt_con
         stability_gate_.Reset();
         state_machine_.SetInitializing(reason);
         RCLCPP_INFO(this->get_logger(),
-                    "[LostRecover] %s: pos=[%.3f, %.3f, %.3f], TP=%.3f, stability gate armed",
+                    "[LostRecover] %s: pos=[%.3f, %.3f, %.3f], yaw=%.2f deg, TP=%.3f, stability gate armed",
                     reason, ndt_pose.translation().x(), ndt_pose.translation().y(),
-                    ndt_pose.translation().z(), last_ndt_confidence_);
+                    ndt_pose.translation().z(), math::YawDeg(ndt_pose), last_ndt_confidence_);
     } else {
         state_machine_.SetGood(reason);
         if (reloc_->DisableAfterGood()) {
             reloc_->Disarm(reason);
         }
         RCLCPP_INFO(this->get_logger(),
-                    "[LostRecover] %s: pos=[%.3f, %.3f, %.3f], TP=%.3f, GOOD",
+                    "[LostRecover] %s: pos=[%.3f, %.3f, %.3f], yaw=%.2f deg, TP=%.3f, GOOD",
                     reason, ndt_pose.translation().x(), ndt_pose.translation().y(),
-                    ndt_pose.translation().z(), last_ndt_confidence_);
+                    ndt_pose.translation().z(), math::YawDeg(ndt_pose), last_ndt_confidence_);
     }
 }
 

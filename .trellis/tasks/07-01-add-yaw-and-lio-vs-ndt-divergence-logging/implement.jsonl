@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "本任务是纯日志改动；需遵守 log shim(LOG_EVERY_N/T)与 hot-path 逐帧节流规则。去节流/逐帧打(NDT-Good每周期、LOST逐帧、jump-rejected逐帧)必须限定在有界窗口内(LOST/拒帧期,≤数十行/次事件),不能污染稳态日志。"}
+{"file": ".trellis/spec/backend/localization-architecture.md", "reason": "需理解 Good/Degraded/Lost/WaitForInitialPose 状态机与 NDT 校正/recovery 数据流,才能把 yaw+散度日志插到正确位置(MaybeNdtCorrectGood、LOST recovery、smoother 冻结)。"}

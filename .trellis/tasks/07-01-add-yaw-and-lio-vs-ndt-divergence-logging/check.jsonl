@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "验收核心:新日志是否遵守 hot-path 节流约束——去节流的逐帧/每周期日志是否有界(仅LOST/拒帧窗口),字段口径(dt=%.3f m / dr=%.2f deg)是否与现有一致。"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "核对纯日志改动未触碰控制逻辑/阈值/发布路径,命名与风格达标。"}
